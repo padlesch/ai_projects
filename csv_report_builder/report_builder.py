@@ -1,6 +1,6 @@
 """
 Универсальная сборка Excel-отчёта из папки CSV: каждый CSV -> отдельный лист в едином оформлении
-(стиль — из build_app_excel12.py «Распределение амбулаторных услуг в стационарах») + лист «Содержание»
+(палитра B «стандартный шаблон» с канваса «Палитра отчётов»; палитра A — старый формат АПП) + лист «Содержание»
 + лист «Справка по колонкам».
 
 Что делает сам, без настроек:
@@ -77,7 +77,8 @@ DEFAULTS = {
     },
     "style": {
         "font": "Arial Narrow", "size": 14,
-        "title_color": "002060", "subtitle_color": "C00000", "muted_color": "808080",
+        "palette": "B",                # B — стандартный шаблон (основной) | A — старый формат АПП
+        "colors": {},                  # переопределение цветов палитры: {title: "1B3A5C", levels: {0: "C9DCEC"}}
         "view": "page_break",          # page_break (страничный, как в АПП) | normal
         "zoom": 70,
         "paper": "auto",               # auto (A3, если таблица широкая) | A3 | A4
@@ -107,18 +108,60 @@ DEFAULTS = {
 }
 
 # ---------------------------------------------------------------- палитра (из build_app_excel12.py)
-C_BLACK, C_GREY, C_GREY_DARK, C_GREY_LIGHT, C_SERVICE = "000000", "808080", "767171", "BFBFBF", "595959"
-HEAD_FILLS = {"dimension": "F2F2F2", "count": "DEEBF7", "money": "E2F0D9", "number": "F2F2F2",
-              "pct": "FFF2CC", "delta": "FFF2CC", "delta_pct": "FFF2CC", "service": "F2F2F2"}
-GROUP_FILL_YEAR, GROUP_FILL_DELTA = "F2F2F2", "FFF2CC"
-LEVEL_FILLS = {0: "F4B183", 1: "FBE5D6", 2: "FFF2CC", 3: "DDEBF7", 4: "EDEDED"}
-TOTAL_FILL = "F4B183"
-CF_RED, CF_GREEN, CF_WHITE = "FCE0E0", "C8E8D0", "FFFFFF"
-LINK_COLOR = "0563C1"
-HEAD_SIDE = Side(style="thin", color=C_GREY_LIGHT)
-DATA_SIDE = Side(style="thin", color="D9D9D9")
-HEAD_BORDER = Border(left=HEAD_SIDE, right=HEAD_SIDE, top=HEAD_SIDE, bottom=HEAD_SIDE)
-DATA_BORDER = Border(left=DATA_SIDE, right=DATA_SIDE, top=DATA_SIDE, bottom=DATA_SIDE)
+# Палитры. B — «стандартный шаблон (основной)» с канваса «Палитра отчётов»: сине-серые уровни, тёплые цвета —
+# только акценты, без фиолетовых. A — старый формат АПП (build_app_excel12.py). Любой цвет переопределяется
+# в конфиге: style: {palette: B, colors: {title: "1B3A5C", levels: {0: "C9DCEC"}}}
+PALETTES = {
+    "B": {
+        "text": "1F1F1F", "title": "1B3A5C", "subtitle": "2D6A73", "muted": "555F69", "service": "555F69",
+        "numbers": "66707A", "subrow": "555F69", "link": "1B3A5C", "alert": "9E3423",
+        "head_fill": "E8ECF0", "head_text": "1B3A5C", "head_delta_text": "1B3A5C", "head_kind_fills": {},
+        "group_fill_year": "E8ECF0", "group_fill_delta": "E8ECF0",
+        "levels": {0: "C9DCEC", 1: "DCE8F3", 2: "EAF1F8", 3: "EEF4EA"}, "level_deep": "F5F7F9",
+        "total": "C9DCEC", "key_column": "ECEFF2",
+        "head_border": "9AA5B1", "data_border": "D3D9DF", "outer_border": "9AA5B1",
+        "red": "F6DAD0", "green": "E1EEDC",           # пары «Отклонение» / «Норма, рост» из блока 4
+        "title_font": "Arial",                        # заголовки — Arial, таблицы — Arial Narrow
+    },
+    "A": {
+        "text": "000000", "title": "002060", "subtitle": "C00000", "muted": "808080", "service": "595959",
+        "numbers": "BFBFBF", "subrow": "7F7F7F", "link": "0563C1", "alert": "C00000",
+        "head_fill": "F2F2F2", "head_text": "000000", "head_delta_text": "808080",
+        "head_kind_fills": {"count": "DEEBF7", "money": "E2F0D9", "pct": "FFF2CC", "delta": "FFF2CC",
+                            "delta_pct": "FFF2CC"},
+        "group_fill_year": "F2F2F2", "group_fill_delta": "FFF2CC",
+        "levels": {0: "F4B183", 1: "FBE5D6", 2: "FFF2CC", 3: "DDEBF7", 4: "EDEDED"}, "level_deep": "EDEDED",
+        "total": "F4B183", "key_column": None,
+        "head_border": "BFBFBF", "data_border": "D9D9D9", "outer_border": None,
+        "red": "FCE0E0", "green": "C8E8D0",
+        "title_font": None,
+    },
+}
+CF_WHITE = "FFFFFF"
+P = {}                                   # активная палитра (apply_palette)
+HEAD_BORDER = DATA_BORDER = None
+
+
+def apply_palette(style):
+    """Палитра из style.palette + переопределения style.colors; границы — из её цветов."""
+    global P, HEAD_BORDER, DATA_BORDER
+    name = str(style.get("palette", "B")).upper()
+    if name not in PALETTES:
+        sys.exit(f"Нет палитры «{name}» — есть: {', '.join(PALETTES)}")
+    P = deep_merge(PALETTES[name], style.get("colors") or {})
+    P["levels"] = {int(k): v for k, v in P["levels"].items()}
+    head = Side(style="thin", color=P["head_border"])
+    data = Side(style="thin", color=P["data_border"])
+    HEAD_BORDER = Border(left=head, right=head, top=head, bottom=head)
+    DATA_BORDER = Border(left=data, right=data, top=data, bottom=data)
+
+
+def level_fill(level):
+    return P["levels"].get(level, P["level_deep"])
+
+
+def head_fill(kind):
+    return P["head_kind_fills"].get(kind, P["head_fill"])
 
 FMT = {
     "count": r"#,##0;\-#,##0;\-",
@@ -636,10 +679,11 @@ class Styler:
         self.s = style
         self._fonts, self._fills, self._align = {}, {}, {}
 
-    def font(self, size=None, bold=False, color=C_BLACK, italic=False, underline=None):
-        key = (size, bold, color, italic, underline)
+    def font(self, size=None, bold=False, color=None, italic=False, underline=None, name=None):
+        color = color or P["text"]
+        key = (size, bold, color, italic, underline, name)
         if key not in self._fonts:
-            self._fonts[key] = Font(name=self.s["font"], size=size or self.s["size"], bold=bold, color=color,
+            self._fonts[key] = Font(name=name or self.s["font"], size=size or self.s["size"], bold=bold, color=color,
                                     italic=italic, underline=underline)
         return self._fonts[key]
 
@@ -654,12 +698,12 @@ class Styler:
             self._align[key] = Alignment(horizontal=h, vertical="center", indent=indent, wrap_text=wrap)
         return self._align[key]
 
-    def head(self, ws, row, col, value=None, fill="F2F2F2", color=C_BLACK, size=None):
+    def head(self, ws, row, col, value=None, fill=None, color=None, size=None):
         cell = ws.cell(row, col)
         if value is not None:
             cell.value = value
-        cell.font = self.font(size, True, color)
-        cell.fill = self.fill(fill)
+        cell.font = self.font(size, True, color or P["head_text"])
+        cell.fill = self.fill(fill or P["head_fill"])
         cell.alignment = self.align("center", wrap=True)
         cell.border = HEAD_BORDER
         return cell
@@ -669,7 +713,7 @@ def link(cell, sheet, st, size=11, text=None):
     if text is not None:
         cell.value = text
     cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{sheet}'!A1")
-    cell.font = st.font(size, False, LINK_COLOR, underline="single")
+    cell.font = st.font(size, False, P["link"], underline="single")
 
 
 def mix(color, share):
@@ -679,7 +723,7 @@ def mix(color, share):
 
 def colors_for(col, coloring):
     positive = (col.positive_is or coloring["positive_is"]).lower()
-    return (CF_GREEN, CF_RED) if positive == "good" else (CF_RED, CF_GREEN)   # (рост, снижение)
+    return (P["green"], P["red"]) if positive == "good" else (P["red"], P["green"])   # (рост, снижение)
 
 
 def static_colors(values, col, coloring):
@@ -733,11 +777,11 @@ def write_sheet(ws, rep, fc, cfg, st):
     # --- строки 1–4: ссылка, заголовок, подзаголовок, описание
     link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
     title_col = 1 + offset
-    ws.cell(2, title_col, fc.get("title") or rep.title).font = st.font(16, True, style["title_color"])
+    ws.cell(2, title_col, fc.get("title") or rep.title).font = st.font(16, True, P["title"], name=P["title_font"])
     subtitle = fc.get("subtitle", cfg["book"].get("subtitle"))
     if subtitle:
-        ws.cell(3, title_col, subtitle).font = st.font(size, False, style["subtitle_color"])
-    ws.cell(4, title_col, rep.description).font = st.font(size, False, style["muted_color"])
+        ws.cell(3, title_col, subtitle).font = st.font(size, True, P["subtitle"], name=P["title_font"])
+    ws.cell(4, title_col, rep.description).font = st.font(size, False, P["muted"], name=P["title_font"])
     for r in (2, 3, 4):
         ws.cell(r, title_col).alignment = st.align("left")
 
@@ -769,19 +813,19 @@ def write_sheet(ws, rep, fc, cfg, st):
         c = cols[j]
         ci = col_idx[id(c)]
         kind = "service" if c.role in ("service", "subrow") else (c.kind if c.is_metric else "dimension")
-        fill = HEAD_FILLS.get(kind, "F2F2F2")
-        color = C_GREY if c.role in ("service", "subrow") else C_BLACK
+        fill = head_fill(kind)
+        color = P["muted"] if c.role in ("service", "subrow") else P["head_text"]
         hsize = 11 if c.role in ("service", "subrow") else (size if len(str(c.label)) <= 60 else 12)
         if two_level and c.group:
             k = j
             while k + 1 < len(cols) and cols[k + 1].group == c.group:
                 k += 1
-            gfill = GROUP_FILL_DELTA if str(c.group).startswith("Δ") else GROUP_FILL_YEAR
+            gfill = P["group_fill_delta"] if str(c.group).startswith("Δ") else P["group_fill_year"]
             for m in range(j, k + 1):
                 st.head(ws, head1, col_idx[id(cols[m])], fill=gfill)
                 mk = cols[m].kind
-                st.head(ws, head2, col_idx[id(cols[m])], cols[m].label, HEAD_FILLS.get(mk, "F2F2F2"),
-                        C_GREY if mk in ("delta", "delta_pct") else C_BLACK)
+                st.head(ws, head2, col_idx[id(cols[m])], cols[m].label, head_fill(mk),
+                        P["head_delta_text"] if mk in ("delta", "delta_pct") else P["head_text"])
             ws.cell(head1, ci).value = c.group
             if k > j:
                 ws.merge_cells(start_row=head1, start_column=ci, end_row=head1, end_column=col_idx[id(cols[k])])
@@ -794,15 +838,15 @@ def write_sheet(ws, rep, fc, cfg, st):
             ws.merge_cells(start_row=head1, start_column=ci, end_row=head2, end_column=ci)
         elif two_level:
             ws.cell(head1, ci).value = "служебная"
-            ws.cell(head1, ci).font = st.font(9, True, C_GREY)
+            ws.cell(head1, ci).font = st.font(9, True, P["muted"])
             ws.cell(head2, ci).value = c.label
         j += 1
     if numbers_row:
         for ci in range(1, ncols + 1):
             cell = ws.cell(numbers_row, ci, "+" if (ci == 1 and rep.row_numbers) else ci - offset)
-            cell.font = st.font(10, False, C_GREY_LIGHT)
+            cell.font = st.font(10, False, P["numbers"])
             cell.alignment = st.align("center")
-            cell.border = HEAD_BORDER
+            cell.border = DATA_BORDER
 
     # --- данные
     levels = rep.level.values if rep.hierarchy else [None] * n
@@ -816,9 +860,11 @@ def write_sheet(ws, rep, fc, cfg, st):
         is_leaf = [is_sub[i] or next_main[i] is None or levels[next_main[i]] <= levels[i] for i in range(n)]
     else:
         is_leaf = [not t for t in is_total]
-    sub_font = st.font(size - 2, False, "7F7F7F", italic=True)
-    service_font = st.font(11, False, C_SERVICE)
-    no_font = st.font(10, False, C_GREY_LIGHT)
+    sub_font = st.font(size - 2, False, P["subrow"], italic=True)
+    service_font = st.font(11, False, P["service"])
+    no_font = st.font(10, False, P["numbers"])
+    key_metric = main_metric(rep.metrics, table)[0] if P["key_column"] else None
+    key_fill = st.fill(P["key_column"]) if P["key_column"] else None
     pct_cap = coloring["pct_cap"]
     live = str(table.get("formulas", "values")).lower() == "live"
     tech = []          # (колонка, ячейки, формула/правило, пояснение) -> лист «Формулы» и примечания к заголовкам
@@ -830,10 +876,10 @@ def write_sheet(ws, rep, fc, cfg, st):
         r = first_data + i
         lvl = levels[i]
         if rep.hierarchy:
-            fill = LEVEL_FILLS.get(lvl, "EDEDED") if (not is_leaf[i] or lvl == 0) else None
+            fill = level_fill(lvl) if (not is_leaf[i] or lvl == 0) else None
             bold = lvl <= 1
         else:
-            fill = TOTAL_FILL if is_total[i] else None
+            fill = P["total"] if is_total[i] else None
             bold = is_total[i]
         sub = is_sub[i]
         fill_obj = st.fill(fill) if fill else None
@@ -862,6 +908,8 @@ def write_sheet(ws, rep, fc, cfg, st):
                 cell.number_format = FMT_PCT_CAP
             if fill_obj is not None:
                 cell.fill = fill_obj
+            elif c is key_metric and not sub:     # ключевая колонка — акцент в строках-деталях
+                cell.fill = key_fill
         ws.row_dimensions[r].height = 18.75 * size / 14
 
     # --- строка «Итого» над шапкой (SUBTOTAL 109 — только видимые после фильтра строки)
@@ -894,7 +942,7 @@ def write_sheet(ws, rep, fc, cfg, st):
             over_cap = c.cap and not live and isinstance(totals.get(id(c)), (int, float)) and totals[id(c)] > pct_cap
             cell.number_format = FMT_PCT_CAP if over_cap else (c.fmt or "General")
             cell.font = st.font(None, True)
-            cell.fill = st.fill(TOTAL_FILL)
+            cell.fill = st.fill(P["total"])
             cell.border = DATA_BORDER
             cell.alignment = st.align("center")
         cell = ws.cell(total_row, label_col)
@@ -902,7 +950,7 @@ def write_sheet(ws, rep, fc, cfg, st):
             cell.value = "Итого (по видимым строкам)" if live else "Итого"
             cell.alignment = st.align("left")
         if rep.row_numbers:
-            cell.fill, cell.font, cell.border = st.fill(TOTAL_FILL), st.font(10, True), DATA_BORDER
+            cell.fill, cell.font, cell.border = st.fill(P["total"]), st.font(10, True), DATA_BORDER
         ws.row_dimensions[total_row].height = 18.75 * size / 14
 
     # --- раскраска Δ / Δ%
@@ -958,6 +1006,10 @@ def write_sheet(ws, rep, fc, cfg, st):
                 body = "\n\n".join(by_col[id(c)])
                 head_cell[id(c)].comment = Comment(body, "report_builder", width=420,
                                                    height=min(400, 60 + 18 * body.count("\n") + len(body) // 3))
+
+    # --- внешняя рамка таблицы (палитра B: внешняя #9AA5B1, внутренние #D3D9DF)
+    if P["outer_border"] and n:
+        frame(ws, total_row or head1, last_data, 1, ncols, P["outer_border"])
 
     # --- ширины
     widths = {}
@@ -1026,6 +1078,22 @@ def write_sheet(ws, rep, fc, cfg, st):
     paper = style.get("paper", "auto")
     print_setup(ws, style, f"{head1}:{filter_row}", paper == "A3" or (paper == "auto" and total_width > 180))
     return n_colored, len(blocks)
+
+
+def frame(ws, top, bottom, left, right, color):
+    side = Side(style="medium", color=color)
+    for r in range(top, bottom + 1):
+        for ci in (left, right):
+            cell = ws.cell(r, ci)
+            b = cell.border
+            cell.border = Border(left=side if ci == left else b.left, right=side if ci == right else b.right,
+                                 top=b.top, bottom=b.bottom)
+    for ci in range(left, right + 1):
+        for r in (top, bottom):
+            cell = ws.cell(r, ci)
+            b = cell.border
+            cell.border = Border(left=b.left, right=b.right, top=side if r == top else b.top,
+                                 bottom=side if r == bottom else b.bottom)
 
 
 def shown(v, c):
@@ -1175,6 +1243,7 @@ def key_total(rep, table):
 
 
 def build(src_dir, cfg, out_path, explain=False):
+    apply_palette(cfg["style"])
     st = Styler(cfg["style"])
     book = cfg["book"]
     files = discover(src_dir, cfg)
@@ -1235,25 +1304,25 @@ def build(src_dir, cfg, out_path, explain=False):
 
 
 def write_toc(ws, entries, skipped, cfg, src_dir, st):
-    book, style = cfg["book"], cfg["style"]
+    book = cfg["book"]
     ws.sheet_view.showGridLines = False
     title = book.get("title") or os.path.basename(src_dir.rstrip("\\/"))
     ws["A1"] = title
-    ws["A1"].font = st.font(16, True, style["title_color"])
+    ws["A1"].font = st.font(16, True, P["title"], name=P["title_font"])
     row = 2
     if book.get("subtitle"):
-        ws.cell(row, 1, book["subtitle"]).font = st.font(12, False, style["subtitle_color"])
+        ws.cell(row, 1, book["subtitle"]).font = st.font(12, True, P["subtitle"], name=P["title_font"])
         row += 1
-    ws.cell(row, 1, f"Источник: {src_dir}. Собрано {dt.datetime.now():%d.%m.%Y %H:%M}.").font = st.font(11, False, C_GREY)
+    ws.cell(row, 1, f"Источник: {src_dir}. Собрано {dt.datetime.now():%d.%m.%Y %H:%M}.").font = st.font(11, False, P["muted"])
     row += 1
     if str(book.get("formulas_sheet", "hidden")).lower() != "off":
         hidden = str(book.get("formulas_sheet", "hidden")).lower() == "hidden"
         ws.cell(row, 1, "В ячейках — значения (без формул и условного форматирования). Формулы Δ / Δ% / Итого и правила "
                         "раскраски — в примечаниях к заголовкам колонок и на листе «Формулы»"
-                        + (" (скрыт: ПКМ по ярлыку листа → Показать)." if hidden else ".")).font = st.font(11, False, C_GREY)
+                        + (" (скрыт: ПКМ по ярлыку листа → Показать)." if hidden else ".")).font = st.font(11, False, P["muted"])
         row += 1
     for note in book.get("notes") or []:
-        ws.cell(row, 1, note).font = st.font(11, False, C_GREY)
+        ws.cell(row, 1, note).font = st.font(11, False, P["muted"])
         row += 1
     row += 1
     heads = ["№", "Лист", "Описание", "Структура", "Метрики", "Строк", "Ключевой итог", "Значение", "Файл"]
@@ -1283,11 +1352,11 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
             cell.alignment = st.align("center" if ci in (1, 6, 8) else "left", wrap=ci in (3, 4, 5))
     if skipped:
         row += 2
-        ws.cell(row, 1, "Пропущенные файлы").font = st.font(11, True, "C00000")
+        ws.cell(row, 1, "Пропущенные файлы").font = st.font(11, True, P["alert"])
         for f, reason in skipped:
             row += 1
             ws.cell(row, 2, f).font = st.font(11)
-            ws.cell(row, 3, reason).font = st.font(11, False, C_GREY)
+            ws.cell(row, 3, reason).font = st.font(11, False, P["muted"])
     for col, width in zip("ABCDEFGHI", (5, 32, 60, 45, 45, 9, 24, 16, 40)):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = ws.cell(head_row + 1, 1)
@@ -1307,7 +1376,7 @@ def print_setup(ws, style, title_rows=None, a3=False):
     ws.oddFooter.center.text = "Страница &P из &N"
     ws.oddFooter.center.size = 10
     ws.oddFooter.center.font = f"{style['font']},Regular"
-    ws.oddFooter.center.color = C_GREY
+    ws.oddFooter.center.color = P["muted"]
 
 
 def write_formulas(ws, entries, st, style):
@@ -1315,10 +1384,10 @@ def write_formulas(ws, entries, st, style):
     и протянуть вниз (ссылки относительные)."""
     ws.sheet_view.showGridLines = False
     link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
-    ws.cell(2, 1, "Формулы и правила раскраски").font = st.font(16, True, "002060")
+    ws.cell(2, 1, "Формулы и правила раскраски").font = st.font(16, True, P["title"], name=P["title_font"])
     ws.cell(3, 1, "В листах отчёта — только значения. Формулу из колонки D вставьте в первую ячейку диапазона и "
                   "протяните вниз; правило раскраски — Главная → Условное форматирование → Цветовые шкалы → "
-                  "Другие правила.").font = st.font(11, False, C_GREY)
+                  "Другие правила.").font = st.font(11, False, P["muted"])
     heads = ["Лист", "Колонка", "Ячейки", "Формула / правило", "Пояснение"]
     for ci, h in enumerate(heads, start=1):
         st.head(ws, 5, ci, h, size=11)
@@ -1336,7 +1405,7 @@ def write_formulas(ws, entries, st, style):
                 cell = ws.cell(r, ci)
                 cell.border = DATA_BORDER
                 if ci != 1:
-                    cell.font = st.font(11, False, "1F3864" if ci == 4 else C_BLACK)
+                    cell.font = st.font(11, False, P["title"] if ci == 4 else P["text"])
                 cell.alignment = st.align("left", wrap=ci in (3, 4, 5))
     for col, width in zip("ABCDE", (30, 30, 30, 60, 60)):
         ws.column_dimensions[col].width = width
@@ -1348,7 +1417,7 @@ def write_formulas(ws, entries, st, style):
 def write_help(ws, rows, st, style):
     ws.sheet_view.showGridLines = False
     link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
-    ws.cell(2, 1, "Справка по колонкам").font = st.font(16, True, "002060")
+    ws.cell(2, 1, "Справка по колонкам").font = st.font(16, True, P["title"], name=P["title_font"])
     roles = {"metric": "метрика", "dimension": "разрез", "name": "наименование", "service": "служебная",
              "level": "уровень", "subrow": "подстрока «из них»"}
     heads = ["Колонка CSV", "Подпись в шапке", "Роль", "Вид", "Описание", "Листы"]
@@ -1388,6 +1457,8 @@ def write_template(src_dir, cfg, path):
         "  # output: D:\\\\отчёты\\\\итог.xlsx",
         "",
         "style:",
+        "  palette: B             # B — стандартный шаблон (основной) | A — старый формат АПП",
+        "  # colors: {title: \"1B3A5C\"}   # переопределить отдельные цвета палитры",
         "  font: Arial Narrow",
         "  size: 14",
         "  view: page_break        # page_break | normal",

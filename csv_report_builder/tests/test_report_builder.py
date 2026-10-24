@@ -112,3 +112,21 @@ def test_report_number_and_skip(tmp_path):
     write_csv(tmp_path / "черновик.csv", ["x", "n"], [["a", 1]])
     wb = build(tmp_path, files={"*черновик*": {"skip": True}})
     assert len([w for w in wb.worksheets if w.title not in (R.TOC_SHEET, R.HELP_SHEET, R.FORMULAS_SHEET)]) == 1
+
+
+def fill_of(cell):
+    return cell.fill.fgColor.rgb[-6:] if cell.fill and cell.fill.fill_type == "solid" else None
+
+
+def test_palette_b_default_and_a_switch(hierarchy_dir):
+    ws = build(hierarchy_dir).worksheets[1]
+    assert fill_of(ws.cell(8, 2)) == "C9DCEC"                 # «Всего» — уровень 0 палитры B
+    assert fill_of(ws.cell(9, 2)) == "DCE8F3"                 # уровень 1
+    assert fill_of(ws.cell(5, 2)) == "E8ECF0"                 # шапка
+    assert ws.cell(2, 2).font.color.rgb[-6:] == "1B3A5C"      # заголовок — глубокий синий
+    detail = next(r for r in range(8, 30) if ws.cell(r, 2).value == "Хирургия 1")
+    assert fill_of(ws.cell(detail, 4)) == "ECEFF2"            # ключевая колонка «Сумма 2026»
+    ws = build(hierarchy_dir, style={"palette": "A"}).worksheets[1]
+    assert fill_of(ws.cell(8, 2)) == "F4B183"
+    ws = build(hierarchy_dir, style={"colors": {"levels": {0: "112233"}}}).worksheets[1]
+    assert fill_of(ws.cell(8, 2)) == "112233"
