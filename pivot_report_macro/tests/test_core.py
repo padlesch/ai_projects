@@ -108,6 +108,11 @@ def render(root, depth, layout, subt, repeat, grand, info, blanks):
                 cl[1], cl[2] = -1, 0
         elif info == 'field':     # типы и поля ячеек, без оси
             r[0] = -1
+        elif info == 'partial':   # поле известно, кроме ячеек итогов
+            r[0] = -1
+            for cl in r[2]:
+                if cl[1] == CT_SUB:
+                    cl[2] = 0
         for cl in r[2]:
             if not cl[0]:
                 cl[1], cl[2] = -1, 0
@@ -206,7 +211,7 @@ def rows_cases(n_random, rnd):
     for depth in range(1, 11):
         for layout, subt, repeat, grand, info, blanks in itertools.product(
                 layouts, ['none', 'top', 'bottom'], [False, True], [False, True],
-                ['field', 'geom', 'lt'], [False, True]):
+                ['field', 'geom', 'lt', 'partial'], [False, True]):
             if layout == 'tabular' and subt == 'top':
                 continue        # Excel так не умеет
             if layout == 'compact' and repeat:

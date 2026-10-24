@@ -359,12 +359,14 @@ Private Sub Пометить(rng As Range, ByVal роль As String)
     On Error GoTo 0
     If st Is Nothing Then
         Set st = wb.Styles.Add(МЕТКА & роль)
+        On Error Resume Next
         st.IncludeNumber = False
         st.IncludeFont = False
         st.IncludeAlignment = False
         st.IncludeBorder = False
         st.IncludePatterns = False
         st.IncludeProtection = False
+        On Error GoTo 0
     End If
     rng.Style = МЕТКА & роль
 End Sub
@@ -687,7 +689,6 @@ Private Sub СнятьСтроки(pt As PivotTable, rr As Range, ByRef lbl() As
     Dim поля() As String, имяДанных As String, имя As String
     Dim cel As Range, ct As Long, пусто As Boolean
     Dim ax As Object, ok As Boolean
-    Dim образец As Long, полный As Boolean
 
     ReDim inTxt(1 To nR, 1 To nLbl)
     ReDim inCT(1 To nR, 1 To nLbl)
@@ -723,15 +724,12 @@ Private Sub СнятьСтроки(pt As PivotTable, rr As Range, ByRef lbl() As
     Next i
     On Error GoTo 0
 
-    ' Опрос сводной по каждой ячейке — сотни тысяч обращений на большом
-    ' отчёте. Поэтому полностью опрашиваем первые строки; если в них каждое
-    ' место на листе (столбец + отступ) занимает ровно одно поле, уровень
-    ' однозначно читается по месту, и дальше хватает одного отступа.
-    образец = nR
-    If ok And nR > 300 Then образец = 300
-    полный = True
+    ' Сводную опрашиваем по каждой непустой ячейке подписей: уровень
+    ' должен быть точным в любом макете, а не угаданным по образцу.
     For i = 1 To nR
-        If i = образец + 1 Then полный = Not МестоОднозначно(образец)
+        If i Mod 500 = 0 Then
+            Application.StatusBar = "Отчёт из сводной: разбор строк " & i & " из " & nR
+        End If
         пусто = True
         For k = 1 To nLbl
             inTxt(i, k) = ВСтроку(lbl(i, k))
@@ -741,11 +739,7 @@ Private Sub СнятьСтроки(pt As PivotTable, rr As Range, ByRef lbl() As
             inCT(i, k) = -1
             ' по пустым ячейкам спрашиваем сводную только в строке без подписей
             ' (пустой элемент) — иначе на больших отчётах это долго
-            If (Len(Trim$(inTxt(i, k))) > 0 And Not полный) And Not пусто Then
-                On Error Resume Next
-                inInd(i, k) = rr.Cells(i, k).IndentLevel
-                On Error GoTo 0
-            ElseIf Len(Trim$(inTxt(i, k))) > 0 Or пусто Then
+            If Len(Trim$(inTxt(i, k))) > 0 Or пусто Then
                 Set cel = rr.Cells(i, k)
                 On Error Resume Next
                 inInd(i, k) = cel.IndentLevel
@@ -774,30 +768,73 @@ Private Sub СнятьСтроки(pt As PivotTable, rr As Range, ByRef lbl() As
         Next k
     Next i
 
+    ' Не про каждую ячейку сводная знает поле (модель данных называет
+    ' поля иначе, чем RowFields). Тогда второй точный источник — ось:
+    ' каждая ячейка линии оси знает свой адрес на листе, номер ячейки
+    ' в линии и есть уровень.
+    If ok And Not УровниПолны() Then УровниПоОси ax, rr
+    Application.StatusBar = False
 End Sub
 
-' В образце каждое место (столбец + отступ) занято одним полем, и каждое
-' поле живёт в одном месте? Тогда уровень по месту равен уровню по полю.
-Private Function МестоОднозначно(ByVal образец As Long) As Boolean
-    Dim i As Long, k As Long, n As Long, a As Long
-    Dim место() As Long, поле() As Long, м As Long
-    ReDim место(1 To образец * nLbl + 1)
-    ReDim поле(1 To образец * nLbl + 1)
-    For i = 1 To образец
+' У каждой непустой подписи (кроме общего итога) известен уровень?
+Private Function УровниПолны() As Boolean
+    Dim i As Long, k As Long
+    For i = 1 To nR
         For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 And inCT(i, k) <> CT_GRAND Then
-                If inLev(i, k) <= 0 Then Exit Function       ' сводная не ответила
-                м = k * 1000 + inInd(i, k)
-                For a = 1 To n
-                    If место(a) = м Xor поле(a) = inLev(i, k) Then Exit Function
-                    If место(a) = м Then Exit For
-                Next a
-                If a > n Then n = n + 1: место(n) = м: поле(n) = inLev(i, k)
+            If Len(Trim$(inTxt(i, k))) > 0 And inCT(i, k) <> CT_GRAND And inLev(i, k) <= 0 Then
+                If inLT(i) <> LT_GRAND Then Exit Function
             End If
         Next k
     Next i
-    МестоОднозначно = True
+    УровниПолны = True
 End Function
+
+' Уровни по оси сводной: ячейка k линии i, лежащая в строке i на листе,
+' — это подпись уровня k. Берём только обычные линии; итоги получат
+' уровень по месту (ДозаполнитьУровни), т.к. на модели данных путь итога
+' ось отдаёт искажённым.
+Private Sub УровниПоОси(ax As Object, rr As Range)
+    Dim i As Long, k As Long, c As Long, n As Long, ln As Object, rg As Range
+    Dim lev() As Long, поОси As Long, поПолю As Long
+    ReDim lev(1 To nR, 1 To nLbl)
+    On Error Resume Next
+    For i = 1 To nR
+        If inLT(i) = LT_REGULAR Then
+            Set ln = ax.PivotLines(i)
+            n = 0
+            n = ln.PivotLineCells.Count
+            For k = 1 To n
+                Set rg = Nothing
+                Set rg = ln.PivotLineCells(k).Range
+                If Not rg Is Nothing Then
+                    If rg.Row = rr.Row + i - 1 Then
+                        c = rg.Column - rr.Column + 1
+                        If c >= 1 And c <= nLbl Then lev(i, c) = k
+                    End If
+                End If
+            Next k
+        End If
+        Err.Clear
+    Next i
+    On Error GoTo 0
+    ' Смешивать источники нельзя (номера полей и номера уровней оси —
+    ' разные шкалы): берём тот, что знает больше ячеек, остальное ядро
+    ' дозаполнит по месту на листе.
+    For i = 1 To nR
+        For k = 1 To nLbl
+            If Len(Trim$(inTxt(i, k))) > 0 Then
+                If lev(i, k) > 0 Then поОси = поОси + 1
+                If inLev(i, k) > 0 Then поПолю = поПолю + 1
+            End If
+        Next k
+    Next i
+    If поОси <= поПолю Then Exit Sub
+    For i = 1 To nR
+        For k = 1 To nLbl
+            inLev(i, k) = lev(i, k)
+        Next k
+    Next i
+End Sub
 
 ' Пустое значение сводной: пусто, ошибка или пустая строка
 Private Function ПустоеЗначение(v As Variant) As Boolean
@@ -1311,6 +1348,8 @@ Private Sub ПостроитьУровни()
     ReDim mCellLev(1 To nR, 1 To nLbl)
     ReDim сыр(1 To nR, 1 To nLbl)
 
+    ДозаполнитьУровни
+
     поПолям = True
     For i = 1 To nR
         If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
@@ -1376,6 +1415,49 @@ Private Sub ПостроитьУровни()
         Next k
     Next j
 
+End Sub
+
+' Ячейка, о которой сводная не сказала поле (бывает у итогов и на модели
+' данных), получает уровень по месту на листе — если на этом месте
+' (столбец + отступ) у остальных ячеек встречается ровно одно поле.
+Public Sub ДозаполнитьУровни()
+    Dim i As Long, k As Long, a As Long, n As Long, м As Long
+    Dim место() As Long, ур() As Long, двояко() As Boolean
+    ReDim место(1 To nR * nLbl + 1)
+    ReDim ур(1 To nR * nLbl + 1)
+    ReDim двояко(1 To nR * nLbl + 1)
+    For i = 1 To nR
+        If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
+            For k = 1 To nLbl
+                If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) > 0 Then
+                    м = k * 1000 + Мин(Макс(inInd(i, k), 0), 999)
+                    For a = 1 To n
+                        If место(a) = м Then Exit For
+                    Next a
+                    If a > n Then
+                        n = n + 1: место(n) = м: ур(n) = inLev(i, k)
+                    ElseIf ур(a) <> inLev(i, k) Then
+                        двояко(a) = True
+                    End If
+                End If
+            Next k
+        End If
+    Next i
+    For i = 1 To nR
+        If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
+            For k = 1 To nLbl
+                If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) <= 0 Then
+                    м = k * 1000 + Мин(Макс(inInd(i, k), 0), 999)
+                    For a = 1 To n
+                        If место(a) = м Then
+                            If Not двояко(a) Then inLev(i, k) = ур(a)
+                            Exit For
+                        End If
+                    Next a
+                End If
+            Next k
+        End If
+    Next i
 End Sub
 
 Private Sub ВставитьЗнач(ByRef a() As Long, ByRef n As Long, ByVal v As Long)
@@ -1448,9 +1530,9 @@ End Sub
 '==========================================================================
 Public Sub ПорядокСтрок()
 
-    Dim i As Long, k As Long, n As Long, счёт As Long, r As Long
-    Dim ранг As New Collection
+    Dim i As Long, k As Long, n As Long, r As Long, m As Long, a As Long
     Dim idx() As Long, ключ() As String, s As String
+    Dim ранг() As Long, сп() As Long, пк() As String
 
     ReDim mOrd(1 To nR)
     nOrd = 0
@@ -1460,10 +1542,42 @@ Public Sub ПорядокСтрок()
         If mType(i) = LT_GRAND Then nOrd = nOrd + 1: mOrd(nOrd) = i
     Next i
 
+    ' Ранг группы уровня k = номер строки, где группа появилась впервые.
+    ' Считается сортировкой путей (n·log n), без словарей: так быстро
+    ' и в Excel, и где угодно ещё, на любом объёме.
+    ReDim ранг(1 To nR, 1 To mMaxD)
+    ReDim сп(1 To nR)
+    ReDim пк(1 To nR)
+    For k = 1 To mMaxD
+        m = 0
+        For i = 1 To nR
+            If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK And Not mDrop(i) Then
+                If mDepth(i) >= k Then m = m + 1: сп(m) = i: пк(m) = mPath(i, k)
+            End If
+        Next i
+        If m > 0 Then
+            СортироватьСлиянием сп, пк, m
+            a = 1
+            For i = 2 To m + 1
+                If i > m Then
+                    s = Chr$(2)
+                Else
+                    s = пк(i)
+                End If
+                If i > m Or s <> пк(a) Then
+                    ' сортировка устойчивая: первый в серии — первое появление
+                    For r = a To i - 1
+                        ранг(сп(r), k) = сп(a)
+                    Next r
+                    a = i
+                End If
+            Next i
+        End If
+    Next k
+
     ReDim idx(1 To nR)
     ReDim ключ(1 To nR)
     n = 0
-    счёт = 0
     For i = 1 To nR
         If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK And Not mDrop(i) Then
             n = n + 1
@@ -1471,12 +1585,7 @@ Public Sub ПорядокСтрок()
             s = ""
             For k = 1 To mMaxD
                 If k <= mDepth(i) Then
-                    r = ВзятьРанг(ранг, mPath(i, k))
-                    If r = 0 Then
-                        счёт = счёт + 1
-                        r = счёт
-                        ранг.Add r, "k" & mPath(i, k)
-                    End If
+                    r = ранг(i, k)
                 Else
                     r = 0          ' своя строка группы — раньше детей
                 End If
@@ -1493,13 +1602,6 @@ Public Sub ПорядокСтрок()
     Next i
 
 End Sub
-
-Private Function ВзятьРанг(c As Collection, ByVal k As String) As Long
-    On Error Resume Next
-    ВзятьРанг = c("k" & k)
-    If Err.Number <> 0 Then ВзятьРанг = 0
-    Err.Clear
-End Function
 
 ' Устойчивая сортировка слиянием индексов по строковым ключам
 Private Sub СортироватьСлиянием(ByRef idx() As Long, ByRef ключ() As String, ByVal n As Long)
