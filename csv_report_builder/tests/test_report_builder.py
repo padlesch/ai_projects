@@ -100,8 +100,12 @@ def test_live_mode_writes_formulas(hierarchy_dir):
 def test_flat_totals_are_values(tmp_path):
     write_csv(tmp_path / "s.csv", ["Товар", "Кол-во 2026", "Кол-во 2025"], [["a", 5, 2], ["b", 1, 4]])
     ws = build(tmp_path).worksheets[1]
-    total = [ws.cell(5, i).value for i in range(1, 6)]
+    # шапка (5–6) -> «Итого» (7) -> номера колонок с автофильтром (8) -> данные (9…)
+    assert ws.cell(5, 1).value == "Товар"
+    total = [ws.cell(7, i).value for i in range(1, 6)]
     assert total == ["Итого", 6, 6, 0, 0.0]
+    assert ws.cell(8, 1).value == 1 and ws.auto_filter.ref.startswith("A8:")
+    assert ws.cell(9, 1).value == "a" and ws.freeze_panes.endswith("9")
 
 
 def test_report_number_and_skip(tmp_path):
@@ -184,8 +188,8 @@ def test_column_group_colours_and_no_sum_for_numbers(ambiguous_dir):
     ws = wb.worksheets[1]
     heads = {}
     for c in range(1, ws.max_column + 1):       # первое вхождение подписи («Случаи» есть и в 2026, и в Δ)
-        heads.setdefault(ws.cell(7, c).value or ws.cell(6, c).value,
-                         fill_of(ws.cell(7, c)) or fill_of(ws.cell(6, c)))
+        heads.setdefault(ws.cell(6, c).value or ws.cell(5, c).value,
+                         fill_of(ws.cell(6, c)) or fill_of(ws.cell(5, c)))
     assert heads["Случаи"] == "DCE8F3" and heads["Балл"] == "D6ECEC"
-    total = {ws.cell(6, c).value: ws.cell(5, c).value for c in range(1, ws.max_column + 1)}
+    total = {ws.cell(5, c).value: ws.cell(7, c).value for c in range(1, ws.max_column + 1)}
     assert total["Балл"] is None                              # баллы в «Итого» не складываются
