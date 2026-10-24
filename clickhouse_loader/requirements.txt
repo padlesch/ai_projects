@@ -1,0 +1,6 @@
+clickhouse-connect>=0.7
+clickhouse-driver>=0.2.6
+pyarrow>=14
+charset-normalizer>=3
+python-calamine>=0.2
+openpyxl>=3.1
