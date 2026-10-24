@@ -6,6 +6,12 @@ Private Function Поле(ByVal s As String, ByVal n As Long, ByVal sep As Strin
     If n <= UBound(a) Then Поле = a(n)
 End Function
 
+Public ВремяЯдра As String
+
+Public Function Время() As String
+    Время = ВремяЯдра
+End Function
+
 Public Function ТестСтроки(ByVal все As String) As String
     Dim кейсы, c As Long, out As String
     кейсы = Split(все, Chr(29))
@@ -38,12 +44,20 @@ Private Function ОдинКейс(ByVal s As String) As String
             inInd(i, k) = CLng(f(3))
         Next k
     Next i
+    Dim t0 As Double, t1 As Double, t2 As Double, t3 As Double
+    t0 = Timer
     ЯдроСтроки
+    t1 = Timer
     ПорядокСтрок
+    t2 = Timer
     ЯдроПослеПорядка
+    t3 = Timer
+    ВремяЯдра = Format(t1 - t0, "0.00") & " / " & Format(t2 - t1, "0.00") & " / " & Format(t3 - t2, "0.00")
+    Dim части() As String
+    ReDim части(1 To nOrd)
     For p = 1 To nOrd
         i = mOrd(p)
-        r = r & i & Chr(30) & mDepth(i) & Chr(30) & mType(i) & Chr(30) & mOutLvl(p) & Chr(30)
+        r = i & Chr(30) & mDepth(i) & Chr(30) & mType(i) & Chr(30) & mOutLvl(p) & Chr(30)
         If mType(i) = LT_GRAND Then
             r = r & "G"
         ElseIf mРодитель(i) Then
@@ -53,9 +67,9 @@ Private Function ОдинКейс(ByVal s As String) As String
             If mOutR(p, k) > 0 Then t = inTxt(mOutR(p, k), mOutC(p, k)) Else t = mOutLbl(p, k)
             r = r & Chr(30) & t & Chr(31) & mOutInd(p, k)
         Next k
-        r = r & Chr(10)
+        части(p) = r
     Next p
-    ОдинКейс = r
+    ОдинКейс = Join(части, Chr(10))
 End Function
 
 ' ---------- столбцы ----------
