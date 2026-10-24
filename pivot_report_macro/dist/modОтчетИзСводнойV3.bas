@@ -60,8 +60,12 @@ Private Const CT_BLANK      As Long = 9
 
 '--- палитра --------------------------------------------------------------
 Private cTitle As Long, cBordo As Long, cHead As Long, cNum As Long
-Private cBrd As Long, cBrdOut As Long
+Private cBrd As Long, cBrdOut As Long, cHeadFont As Long
+Private p“он As Boolean           ' палитра считаетс€ от цвета шапки
+Private p»тог As Long, p”р(1 To 4) As Long, p люч As Long, pѕром ол As Long
 Private mѕал As Long
+Private Const C_ѕ–ќ„≈–  As Long = 10921638   ' RGB(166,166,166) Ч Ђ-ї вместо пусто
+Private Const C_“≈ —“ As Long = 2039583       ' RGB(31,31,31) Ч основной текст
 
 '--- вход €дра строк: то, что сн€то с листа ---------------------------------
 Private nR As Long, nLbl As Long
@@ -108,6 +112,7 @@ Private dDepth() As Long          ' сколько уровней у столбца задано
 Private cType() As Long
 Private cOrd() As Long
 Private nCOrd As Long
+Private mGrandTxt As String       ' как общий итог назван в самой сводной
 '#ƒ≈ Ћ- ќЌ≈÷
 
 Private mLblCap() As String       ' подписи столбцов с уровн€ми строк
@@ -119,6 +124,7 @@ Private m‘ормат ол() As String    ' числовой формат по колонкам источника
 Private m‘ормат—тр() As String    ' ... или по строкам (меры в строках)
 Private m‘ильтры As String
 Private mQuiet As Boolean         ' True Ч работать молча (вызов из другого макроса)
+Private Const ћ≈“ ј As String = "ќтчЄт_"   ' префикс стилей-меток ролей
 
 
 '==========================================================================
@@ -198,9 +204,10 @@ End Sub
 
 '==========================================================================
 '  ѕјЋ»“–џ
-'   ажда€ задаЄтс€ двум€ цветами: заголовок и шапка. —ветлые тона итогов
-'  считаютс€ от цвета шапки, поэтому набор нельз€ рассогласовать.
-'  „тобы добавить палитру: увеличить „ислоѕалитр и дописать Case.
+'  1Ц2 Ч Ђтоновыеї: всЄ считаетс€ от цвета шапки (светлые доли к белому).
+'  3Ц4 Ч из дизайна: у каждого уровн€ свой заданный цвет, шапка светла€
+'        с тЄмным текстом, свои границы и цвет подзаголовка.
+'  „тобы добавить палитру: увеличить „ислоѕалитр, дописать им€ и Case.
 '==========================================================================
 Private Function „ислоѕалитр() As Long
     „ислоѕалитр = 4
@@ -209,30 +216,59 @@ End Function
 Private Function »м€ѕалитры(ByVal n As Long) As String
     Select Case n
         Case 2: »м€ѕалитры = "—ерый"
-        Case 3: »м€ѕалитры = "ƒизайн 1"
-        Case 4: »м€ѕалитры = "ƒизайн 2"
+        Case 3: »м€ѕалитры = "A Ј старый формат (персиковые итоги)"
+        Case 4: »м€ѕалитры = "B Ј стандартный шаблон (сине-серые итоги)"
         Case Else: »м€ѕалитры = "“Ємно-синий"
     End Select
 End Function
 
-Private Sub ÷ветаѕалитры(ByVal n As Long, ByRef заг As Long, ByRef шап As Long)
-    Select Case n
-        Case 2:  заг = RGB(74, 79, 85):   шап = RGB(112, 119, 126)
-        ' TODO: цвета из дизайна Ч заменить на свои (заголовок, шапка)
-        Case 3:  заг = RGB(31, 56, 100):  шап = RGB(47, 78, 111)
-        Case 4:  заг = RGB(74, 79, 85):   шап = RGB(112, 119, 126)
-        Case Else: заг = RGB(31, 56, 100): шап = RGB(47, 78, 111)
-    End Select
-End Sub
-
 Private Sub InitPalette(ByVal n As Long)
     If n < 1 Or n > „ислоѕалитр() Then n = 1
     mѕал = n
-    ÷ветаѕалитры n, cTitle, cHead
-    cBordo = RGB(139, 46, 60)        ' #8B2E3C  подзаголовок / фильтры
-    cNum = RGB(166, 166, 166)        ' #A6A6A6  нумераци€
-    cBrd = RGB(191, 191, 191)        ' #BFBFBF  внутренние границы
-    cBrdOut = RGB(140, 140, 140)     ' #8C8C8C  внешн€€ рамка
+    p“он = False
+    cHeadFont = RGB(255, 255, 255)
+    cBordo = RGB(139, 46, 60)        ' подзаголовок / фильтры
+    cNum = RGB(166, 166, 166)        ' нумераци€
+    cBrd = RGB(191, 191, 191)        ' внутренние границы
+    cBrdOut = RGB(140, 140, 140)     ' внешн€€ рамка
+    Select Case n
+        Case 2          ' серый
+            p“он = True
+            cTitle = RGB(74, 79, 85): cHead = RGB(112, 119, 126)
+        Case 3          ' A Ј старый формат
+            cTitle = RGB(31, 56, 100)       ' #1F3864 тЄмно-синий
+            cBordo = RGB(154, 59, 44)       ' #9A3B2C кирпичный
+            cHead = RGB(242, 242, 242)      ' #F2F2F2 шапка таблицы
+            cHeadFont = RGB(31, 31, 31)     ' #1F1F1F
+            cNum = RGB(107, 107, 107)       ' #6B6B6B служебный
+            cBrdOut = RGB(166, 166, 166)    ' #A6A6A6
+            cBrd = RGB(208, 208, 208)       ' #D0D0D0
+            p»тог = RGB(247, 199, 172)      ' #F7C7AC общий итог
+            p”р(1) = RGB(251, 226, 213)     ' #FBE2D5
+            p”р(2) = RGB(255, 235, 205)     ' #FFEBCD
+            p”р(3) = RGB(233, 243, 227)     ' #E9F3E3
+            p люч = RGB(237, 237, 237)      ' #EDEDED ключева€ колонка
+            pѕром ол = RGB(221, 235, 247)   ' #DDEBF7 промежуточные итоги
+        Case 4          ' B Ј стандартный шаблон
+            cTitle = RGB(27, 58, 92)        ' #1B3A5C глубокий синий
+            cBordo = RGB(45, 106, 115)      ' #2D6A73 морска€ волна
+            cHead = RGB(232, 236, 240)      ' #E8ECF0 шапка таблицы
+            cHeadFont = RGB(31, 31, 31)     ' #1F1F1F
+            cNum = RGB(102, 112, 122)       ' #66707A служебный
+            cBrdOut = RGB(154, 165, 177)    ' #9AA5B1
+            cBrd = RGB(211, 217, 223)       ' #D3D9DF
+            p»тог = RGB(201, 220, 236)      ' #C9DCEC общий итог
+            p”р(1) = RGB(220, 232, 243)     ' #DCE8F3
+            p”р(2) = RGB(234, 241, 248)     ' #EAF1F8
+            p”р(3) = RGB(238, 244, 234)     ' #EEF4EA
+            p люч = RGB(236, 239, 242)      ' #ECEFF2 ключева€ колонка
+            pѕром ол = RGB(214, 236, 236)   ' #D6ECEC бирюзовый светлый
+        Case Else       ' тЄмно-синий
+            p“он = True
+            cTitle = RGB(31, 56, 100): cHead = RGB(47, 78, 111)
+    End Select
+    ' уровни глубже третьего дизайн не задаЄт Ч ещЄ светлее третьего
+    p”р(4) = ќттенок(p”р(3), 0.5)
 End Sub
 
 ' ќсветление к белому: 0 Ч исходный цвет, 1 Ч чистый белый
@@ -246,8 +282,42 @@ Private Function ќттенок(ByVal c As Long, ByVal f As Double) As Long
     ќттенок = RGB(r + (255 - r) * f, g + (255 - g) * f, b + (255 - b) * f)
 End Function
 
-' Ќасколько светлой должна быть строка данного класса.
-' "G" Ч общий итог, "S<n>" Ч родитель/промежуточный итог уровн€ n, "" Ч детализаци€
+' ÷вет €чейки по классу строки и колонки; -1 Ч без заливки.
+' —трока: "G" Ч общий итог, "S<n>" Ч итог/родитель уровн€ n, "" Ч детализаци€.
+'  олонка: "G" Ч общий итог, "S" Ч промежуточный, "" Ч обычна€.
+Private Function ÷вет–оли(ByVal стр As String, ByVal кол As String) As Long
+    Dim f As Double, g As Double, d As Long
+    If p“он Then
+        f = ‘он—троки(стр)
+        g = ‘он олонки(кол, f)
+        If g >= 0 Then
+            ÷вет–оли = ќттенок(cHead, g)
+        ElseIf f >= 0 Then
+            ÷вет–оли = ќттенок(cHead, f)
+        Else
+            ÷вет–оли = -1
+        End If
+        Exit Function
+    End If
+    ' дизайн: строка итога краситс€ целиком, колонки выдел€ютс€ на детализации
+    If стр = "G" Then
+        ÷вет–оли = p»тог
+    ElseIf Left$(стр, 1) = "S" Then
+        d = 1
+        If Len(стр) > 1 Then d = CLng(Mid$(стр, 2))
+        If d > 4 Then d = 4
+        If d < 1 Then d = 1
+        ÷вет–оли = p”р(d)
+    ElseIf кол = "G" Then
+        ÷вет–оли = p люч
+    ElseIf кол = "S" Then
+        ÷вет–оли = pѕром ол
+    Else
+        ÷вет–оли = -1
+    End If
+End Function
+
+' Ќасколько светлой должна быть строка данного класса (тоновые палитры)
 Private Function ‘он—троки(ByVal класс As String) As Double
     Dim d As Long
     ‘он—троки = -1
@@ -260,7 +330,7 @@ Private Function ‘он—троки(ByVal класс As String) As Double
     End If
 End Function
 
-'  олонка главного итога заметно темнее промежуточных
+'  олонка главного итога заметно темнее промежуточных (тоновые палитры)
 Private Function ‘он олонки(ByVal класс As String, ByVal фон—тр As Double) As Double
     ‘он олонки = -1
     If класс <> "G" And класс <> "S" Then Exit Function
@@ -274,14 +344,64 @@ End Function
 
 
 '==========================================================================
+'  ћ≈“ » –ќЋ≈…
+'   аждой €чейке отчЄта, которую красит палитра, назначаетс€ стиль-метка
+'  (ЂќтчЄт_Hї Ч шапка, ЂќтчЄт_RS2ї Ч строка итога 2-го уровн€ и т.п.).
+'  —тиль ничего не форматирует (все Include* = False) Ч он только помнит
+'  роль €чейки. ћетки переживают сохранение, удаление и вставку строк,
+'  и по ним палитра мен€етс€ без служебных €чеек на листе.
+'==========================================================================
+Private Sub ѕометить(rng As Range, ByVal роль As String)
+    Dim wb As Workbook, st As Style
+    Set wb = rng.Worksheet.Parent
+    On Error Resume Next
+    Set st = wb.Styles(ћ≈“ ј & роль)
+    On Error GoTo 0
+    If st Is Nothing Then
+        Set st = wb.Styles.Add(ћ≈“ ј & роль)
+        st.IncludeNumber = False
+        st.IncludeFont = False
+        st.IncludeAlignment = False
+        st.IncludeBorder = False
+        st.IncludePatterns = False
+        st.IncludeProtection = False
+    End If
+    rng.Style = ћ≈“ ј & роль
+End Sub
+
+Private Function –ольячейки(cel As Range) As String
+    Dim s As String
+    On Error Resume Next
+    s = cel.Style.Name
+    On Error GoTo 0
+    If Left$(s, Len(ћ≈“ ј)) = ћ≈“ ј Then –ольячейки = Mid$(s, Len(ћ≈“ ј) + 1)
+End Function
+
+'  ласс строки -> метка: уровни глубже 4-го крас€тс€ как 4-й
+Private Function ћетка—троки(ByVal класс As String) As String
+    Dim d As Long
+    If класс = "G" Then
+        ћетка—троки = "RG"
+    ElseIf Left$(класс, 1) = "S" Then
+        d = CLng(Mid$(класс, 2))
+        If d > 4 Then d = 4
+        ћетка—троки = "RS" & d
+    Else
+        ћетка—троки = "RD"
+    End If
+End Function
+
+
+'==========================================================================
 '  —ћ≈Ќј ѕјЋ»“–џ √ќ“ќ¬ќ√ќ ќ“„®“ј Ч отдельные макросы
-'  —лужебных €чеек нет: цвета узнаютс€ по самим заливкам.  ажда€ заливка
-'  отчЄта Ч это цвет шапки одной из палитр, осветлЄнный на известную долю,
-'  поэтому еЄ можно однозначно перевести в ту же долю новой палитры.
 '==========================================================================
 Public Sub ѕалитраќтчЄта()
     Dim s As String, i As Long, otvet As String, тек As Long
     тек = “екуща€ѕалитра(ActiveSheet)
+    If тек = 0 Then
+        MsgBox "Ќа активном листе не найден отчЄт, построенный макросом.", vbExclamation
+        Exit Sub
+    End If
     For i = 1 To „ислоѕалитр()
         s = s & i & " Ч " & »м€ѕалитры(i)
         If i = тек Then s = s & "   (сейчас)"
@@ -303,7 +423,7 @@ Public Sub ѕалитра—ледующа€()
     ѕалитраЌомер тек Mod „ислоѕалитр() + 1
 End Sub
 
-' ћожно повесить на кнопку панели быстрого доступа: ѕалитраЌомер 2
+' ћожно повесить на кнопку панели быстрого доступа: ѕалитраЌомер 3
 Public Sub ѕалитраЌомер(ByVal n As Long)
     If n < 1 Or n > „ислоѕалитр() Then Exit Sub
     If TypeName(ActiveSheet) <> "Worksheet" Then Exit Sub
@@ -312,117 +432,100 @@ Public Sub ѕалитраЌомер(ByVal n As Long)
     End If
 End Sub
 
-' ƒоли осветлени€, которые вообще встречаютс€ в отчЄте (0 Ч сама шапка)
-Private Function ƒоли«аливки() As Variant
-    Dim a() As Double, n As Long, d As Long, f As Double, g As Double
-    Dim классы As Variant, кк As Variant, c As Variant
-    ReDim a(1 To 200)
-    n = 1: a(1) = 0
-    классы = Array("", "G")
-    For Each c In классы
-        f = ‘он—троки(CStr(c))
-        ƒобавитьƒолю a, n, f
-        For Each кк In Array("G", "S")
-            ƒобавитьƒолю a, n, ‘он олонки(CStr(кк), f)
-        Next кк
-    Next c
-    For d = 1 To 40
-        f = ‘он—троки("S" & d)
-        ƒобавитьƒолю a, n, f
-        For Each кк In Array("G", "S")
-            g = ‘он олонки(CStr(кк), f)
-            ƒобавитьƒолю a, n, g
-        Next кк
-    Next d
-    ReDim Preserve a(1 To n)
-    ƒоли«аливки = a
-End Function
-
-Private Sub ƒобавитьƒолю(ByRef a() As Double, ByRef n As Long, ByVal f As Double)
-    Dim i As Long
-    If f < 0 Then Exit Sub
-    For i = 1 To n
-        If Abs(a(i) - f) < 0.000001 Then Exit Sub
-    Next i
-    n = n + 1
-    a(n) = f
-End Sub
-
-' Ќомер палитры, в которой сейчас окрашен отчЄт; 0 Ч отчЄта нет
+' Ќомер палитры, в которой сейчас окрашен отчЄт (по цвету шапки); 0 Ч отчЄта нет
 Private Function “екуща€ѕалитра(ws As Object) As Long
-    Dim cel As Range, p As Long, заг As Long, шап As Long
-    On Error Resume Next
+    Dim r As Long, p As Long, c As Long
     If TypeName(ws) <> "Worksheet" Then Exit Function
-    For Each cel In ws.Range(ws.Cells(1, 1), ws.Cells(40, 6)).Cells
-        If cel.Interior.Pattern <> xlNone Then
+    For r = 1 To 60
+        If –ольячейки(ws.Cells(r, 1)) = "H" Then
+            c = ws.Cells(r, 1).Interior.Color
             For p = 1 To „ислоѕалитр()
-                ÷ветаѕалитры p, заг, шап
-                If cel.Interior.Color = шап Then “екуща€ѕалитра = p: Exit Function
+                InitPalette p
+                If cHead = c Then “екуща€ѕалитра = p: Exit Function
             Next p
+            “екуща€ѕалитра = 1      ' отчЄт есть, цвет правили вручную
+            Exit Function
         End If
-    Next cel
+    Next r
 End Function
 
+' √еометри€ и классы Ч из меток: столбец A хранит роли строк,
+' строка нумерации Ч роли колонок.
 Private Function ѕерекраситьЋист(ws As Worksheet, ByVal n As Long) As Boolean
 
-    Dim доли As Variant, старые As New Collection, новые As New Collection
-    Dim p As Long, i As Long, заг As Long, шап As Long, нов«аг As Long, новЎап As Long
-    Dim ur As Range, rw As Range, cel As Range, v As Variant
-    Dim нашли As Boolean
+    Dim r As Long, c As Long, посл—тр As Long, посл ол As Long, роль As String
+    Dim rHdr As Long, rHdrEnd As Long, rNum As Long, rData As Long, rLast As Long
+    Dim cLbl As Long, cData As Long, cLast As Long
 
-    If “екуща€ѕалитра(ws) = 0 Then Exit Function
+    посл—тр = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
+    посл ол = ws.UsedRange.Column + ws.UsedRange.Columns.Count - 1
 
-    доли = ƒоли«аливки()
-    ÷ветаѕалитры n, нов«аг, новЎап
+    For r = 1 To посл—тр
+        роль = –ольячейки(ws.Cells(r, 1))
+        If роль = "H" Then
+            If rHdr = 0 Then rHdr = r
+            rHdrEnd = r
+        ElseIf Left$(роль, 1) = "R" Then
+            If rData = 0 Then rData = r
+            rLast = r
+        End If
+    Next r
+    If rHdr = 0 Or rData = 0 Then Exit Function
+    rNum = rHdrEnd + 1
 
-    ' таблица Ђстарый цвет -> новыйї; перва€ запись выигрывает
-    On Error Resume Next
-    For p = 1 To „ислоѕалитр()
-        ÷ветаѕалитры p, заг, шап
-        For i = LBound(доли) To UBound(доли)
-            новые.Add ќттенок(новЎап, доли(i)), "c" & ќттенок(шап, доли(i))
-        Next i
-        старые.Add нов«аг, "t" & заг
-    Next p
-    On Error GoTo 0
+    cLbl = 2
+    For c = 2 To посл ол
+        роль = –ольячейки(ws.Cells(rNum, c))
+        If роль = "C" Or роль = "CG" Or роль = "CS" Then
+            If cData = 0 Then cData = c
+            cLast = c
+        End If
+    Next c
+    If cData = 0 Then Exit Function
 
+    ReDim m ласс—тр(1 To rLast - rData + 1)
+    For r = rData To rLast
+        роль = –ольячейки(ws.Cells(r, 1))
+        Select Case роль
+            Case "RG": m ласс—тр(r - rData + 1) = "G"
+            Case "RS1", "RS2", "RS3", "RS4": m ласс—тр(r - rData + 1) = "S" & Right$(роль, 1)
+            Case Else: m ласс—тр(r - rData + 1) = ""
+        End Select
+    Next r
+    ReDim m ласс ол(1 To cLast - cData + 1)
+    For c = cData To cLast
+        m ласс ол(c - cData + 1) = Mid$(–ольячейки(ws.Cells(rNum, c)), 2)
+    Next c
+
+    InitPalette n
     Application.ScreenUpdating = False
-    Set ur = ws.UsedRange
-    For Each rw In ur.Rows
-        v = rw.Interior.Color
-        If Not IsNull(v) Then
-            ' вс€ строка одного цвета Ч одним вызовом
-            If rw.Cells(1, 1).Interior.Pattern <> xlNone Then
-                If ≈сть люч(новые, "c" & v) Then rw.Interior.Color = новые("c" & v): нашли = True
-            End If
-        Else
-            For Each cel In rw.Cells
-                If cel.Interior.Pattern <> xlNone Then
-                    v = cel.Interior.Color
-                    If ≈сть люч(новые, "c" & v) Then cel.Interior.Color = новые("c" & v): нашли = True
-                End If
-            Next cel
-        End If
-    Next rw
-    ' заголовок отчЄта Ч цветом палитры
-    For Each cel In ws.Range(ws.Cells(1, 1), ws.Cells(3, 4)).Cells
-        v = cel.Font.Color
-        If Not IsNull(v) Then
-            If ≈сть люч(старые, "t" & v) Then cel.Font.Color = старые("t" & v)
-        End If
-    Next cel
+    ѕокрасить ws, rHdr, rNum, rData, rLast, cLbl, cData, cLast
     Application.ScreenUpdating = True
-    ѕерекраситьЋист = нашли
+    ѕерекраситьЋист = True
 
 End Function
 
-Private Function ≈сть люч(c As Collection, ByVal k As String) As Boolean
-    Dim v As Variant
-    On Error Resume Next
-    v = c(k)
-    ≈сть люч = (Err.Number = 0)
-    Err.Clear
-End Function
+' ¬сЄ, что зависит от палитры, Ч в одном месте: и дл€ нового отчЄта,
+' и дл€ перекраски готового.
+Private Sub ѕокрасить(ws As Worksheet, ByVal rHdr As Long, ByVal rNum As Long, _
+                      ByVal rData As Long, ByVal rLast As Long, ByVal cLbl As Long, _
+                      ByVal cData As Long, ByVal cLast As Long)
+    Dim r As Long
+    For r = 1 To rHdr - 1
+        Select Case –ольячейки(ws.Cells(r, cLbl))
+            Case "T": ws.Cells(r, cLbl).Font.Color = cTitle
+            Case "P": ws.Cells(r, cLbl).Font.Color = cBordo
+        End Select
+    Next r
+    With ws.Range(ws.Cells(rHdr, 1), ws.Cells(rNum - 1, cLast))
+        .Interior.Color = cHead
+        .Font.Color = cHeadFont
+    End With
+    ws.Range(ws.Cells(rNum, cLbl), ws.Cells(rNum, cLast)).Font.Color = cNum
+    ws.Range(ws.Cells(rData, 1), ws.Cells(rLast, 1)).Font.Color = cNum
+    «акрасить“ело ws, rData, rLast, cLbl, cData, cLast
+    √раницы ws.Range(ws.Cells(rHdr, 1), ws.Cells(rLast, cLast))
+End Sub
 
 
 '==========================================================================
@@ -503,12 +606,18 @@ Private Function –азобрать—водную(pt As PivotTable, _
     Set m»сходник = db
     vals = „итатьƒиапазон(db, nR, nC)
 
+    mGrandTxt = ""
+    On Error Resume Next
+    mGrandTxt = pt.GrandTotalName
+    Err.Clear
+    On Error GoTo 0
+
     If rr Is Nothing Then
         ' —водна€ без полей в строках: одна строка общего итога
         nLbl = 1
         ReDim lbl(1 To nR, 1 To 1)
         For i = 1 To nR
-            lbl(i, 1) = TXT_GRAND
+            lbl(i, 1) = “екстќбщего»тога()
         Next i
         ReDim mLblCap(1 To 1)
         mLblCap(1) = ""
@@ -562,7 +671,7 @@ Private Sub —н€ть—трокиЅезѕодписей()
     ReDim inInd(1 To nR, 1 To 1)
     ReDim inLT(1 To nR)
     For i = 1 To nR
-        inTxt(i, 1) = TXT_GRAND
+        inTxt(i, 1) = “екстќбщего»тога()
         inCT(i, 1) = CT_GRAND
         inLT(i) = LT_GRAND
     Next i
@@ -788,7 +897,7 @@ Private Sub —н€ть—толбцы(pt As PivotTable)
     If nMeas > 0 Then
         ReDim mMeas(1 To nMeas)
         For j = 1 To nMeas
-            mMeas(j) = „истое»м€(pt.DataFields(j).Name)
+            mMeas(j) = »м€ћеры(pt.DataFields(j))
         Next j
     Else
         ReDim mMeas(1 To 1)
@@ -826,10 +935,10 @@ Private Sub —н€ть—толбцы(pt As PivotTable)
         For k = 1 To cCnt(j)
             cItem(j, k) = “екстЁлемента(ln, k)
             d = ""
-            d = ln.PivotLineCells(k).DataField.Name
+            d = »м€ћеры(ln.PivotLineCells(k).DataField)
             If Err.Number <> 0 Then d = "": Err.Clear
             If Len(d) > 0 Then
-                cDF(j) = „истое»м€(d)
+                cDF(j) = d
                 ' уровень мер определ€ем только по полноразмерным лини€м
                 If cCnt(j) = maxLev And cMeasLev = 0 Then cMeasLev = k
             End If
@@ -840,22 +949,46 @@ Private Sub —н€ть—толбцы(pt As PivotTable)
 
 End Sub
 
-' ѕодпись элемента оси. ” сводных на модели данных Caption часто пуст,
-' а Name возвращает уникальное им€ вида [ginek].[ —— ѕ новый].&[ —] Ч
-' из него берЄм то, что в последних скобках.
+' ѕодпись элемента оси Ч как она показана в сводной. Ёлементы и меры
+' можно переименовать пр€мо в сводной: мен€етс€ Caption, а внутреннее им€
+' (Name) остаЄтс€ исходным, поэтому сначала Caption, затем Name (у OLAP это
+' уникальное им€ вида [ginek].[ —— ѕ новый].&[ —] Ч берЄм последние скобки).
 Private Function “екстЁлемента(ln As Object, ByVal k As Long) As String
-    Dim s As String
+    Dim s As String, pc As Object, ct As Long
     On Error Resume Next
     Err.Clear
-    s = ln.PivotLineCells(k).PivotItem.Caption
-    If Err.Number <> 0 Then Err.Clear: s = ""
+    Set pc = ln.PivotLineCells(k)
+    ct = -1
+    ct = pc.PivotCellType
+    If ct = CT_DATAFIELD Then
+        s = »м€ћеры(pc.DataField)
+        If Err.Number <> 0 Then s = "": Err.Clear
+        If Len(s) = 0 Then
+            s = Trim$(¬—троку(pc.Range.Cells(1, 1).Value))
+            If Err.Number <> 0 Then s = "": Err.Clear
+        End If
+    End If
     If Len(s) = 0 Then
-        Err.Clear
-        s = ln.PivotLineCells(k).PivotItem.Name
+        s = pc.PivotItem.Caption
+        If Err.Number <> 0 Then Err.Clear: s = ""
+    End If
+    If Len(s) = 0 Then
+        s = pc.PivotItem.Name
         If Err.Number <> 0 Then Err.Clear: s = ""
     End If
     On Error GoTo 0
     “екстЁлемента = „истое»м€(s)
+End Function
+
+' Ќазвание меры, как оно показано в сводной (с учЄтом переименовани€)
+Private Function »м€ћеры(df As Object) As String
+    Dim s As String
+    On Error Resume Next
+    s = df.Caption
+    If Err.Number <> 0 Or Len(s) = 0 Then Err.Clear: s = df.Name
+    Err.Clear
+    On Error GoTo 0
+    »м€ћеры = „истое»м€(s)
 End Function
 
 ' «апасной разбор шапки Ч по тексту и типам €чеек на листе.
@@ -954,7 +1087,7 @@ Private Sub —н€ть—толбцыѕоЋисту(pt As PivotTable)
             cItem(j, k) = база
             cCnt(j) = k
         ElseIf cType(j) = LT_GRAND Then
-            cItem(j, 1) = TXT_GRAND
+            cItem(j, 1) = “екстќбщего»тога()
             cCnt(j) = 1
         Else
             cCnt(j) = послЌепуст
@@ -1141,7 +1274,13 @@ End Function
 
 Public Function Ётоќбщий»тог(ByVal s As String) As Boolean
     s = LCase$(Trim$(s))
-    Ётоќбщий»тог = (s = "общий итог" Or s = "grand total" Or s = LCase$(TXT_GRAND))
+    Ётоќбщий»тог = (s = "общий итог" Or s = "grand total" Or s = LCase$(TXT_GRAND) _
+                    Or s = LCase$(Trim$(mGrandTxt)))
+End Function
+
+' ѕодпись общего итога: переименованна€ в сводной, иначе стандартна€
+Public Function “екстќбщего»тога() As String
+    If Len(Trim$(mGrandTxt)) > 0 Then “екстќбщего»тога = mGrandTxt Else “екстќбщего»тога = TXT_GRAND
 End Function
 
 ' Ђ—евер »тогї -> Ђ—еверї; не итог -> ""
@@ -1442,7 +1581,7 @@ Public Sub ядроѕослеѕор€дка()
             For k = 1 To mMaxD
                 свой(k) = ""
             Next k
-            mOutLbl(p, 1) = TXT_GRAND
+            mOutLbl(p, 1) = “екстќбщего»тога()
             mOutLvl(p) = 1
             пред = 0
             GoTo —лед
@@ -1592,7 +1731,7 @@ Public Sub —обратьЎапку()
         If выносить Then dLev(j, 1) = мера(j)
         If cType(j) = LT_GRAND Then
             dDepth(j) = сдвиг + 1
-            If сдвиг + 1 <= nLev Then dLev(j, сдвиг + 1) = TXT_GRAND
+            If сдвиг + 1 <= nLev Then dLev(j, сдвиг + 1) = “екстќбщего»тога()
         Else
             ' сколько Ђнасто€щихї уровней у столбца (без уровн€ меры)
             задано = 0
@@ -1917,20 +2056,52 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     cData = cLbl + nLbl
     cLast = cData + nCOrd - 1
 
+    ' ---------- классы строк и колонок ----------
+    ReDim m ласс—тр(1 To nOrd)
+    ReDim m ласс ол(1 To nCOrd)
+    For ci = 1 To nCOrd
+        j = cOrd(ci)
+        If cType(j) = LT_GRAND Then
+            m ласс ол(ci) = "G"
+        ElseIf cType(j) = LT_SUBTOTAL Then
+            m ласс ол(ci) = "S"
+        Else
+            m ласс ол(ci) = ""
+        End If
+    Next ci
+    For ri = 1 To nOrd
+        i = mOrd(ri)
+        If mType(i) = LT_GRAND Then
+            m ласс—тр(ri) = "G"
+        ElseIf m–одитель(i) Then
+            m ласс—тр(ri) = "S" & mDepth(i)
+        Else
+            m ласс—тр(ri) = ""
+        End If
+    Next ri
+
+    ' ---------- метки ролей: до любого форматировани€ ----------
+    ѕометить ws.Cells(1, cLbl), "T"
+    ѕометить ws.Range(ws.Cells(2, cLbl), ws.Cells(3, cLbl)), "P"
+    ѕометить ws.Range(ws.Cells(rHdr, 1), ws.Cells(rNum - 1, cLast)), "H"
+    ѕометить ws.Range(ws.Cells(rNum, 1), ws.Cells(rNum, cData - 1)), "CL"
+    ѕометить уски ws, rNum, cData, nCOrd, False
+    ѕометить уски ws, rData, 1, nOrd, True
+
     ws.Cells.Font.Name = FNT
 
     ' ---------- шапка листа ----------
     With ws.Cells(1, cLbl)
         .Value = TXT_TITLE
-        .Font.Size = FS_TITLE: .Font.Bold = True: .Font.Color = cTitle
+        .Font.Size = FS_TITLE: .Font.Bold = True
     End With
     With ws.Cells(2, cLbl)
         .Value = TXT_SUB
-        .Font.Size = 10: .Font.Bold = True: .Font.Color = cBordo
+        .Font.Size = 10: .Font.Bold = True
     End With
     With ws.Cells(3, cLbl)               ' фильтры сводной
         .Value = “екстячейки(m‘ильтры)
-        .Font.Size = 9: .Font.Color = cBordo
+        .Font.Size = 9
     End With
 
     ' ---------- шапка таблицы ----------
@@ -1947,8 +2118,6 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     ws.Cells(rNum - 1, 1).Value = "є"
 
     With ws.Range(ws.Cells(rHdr, 1), ws.Cells(rNum - 1, cLast))
-        .Interior.Color = cHead
-        .Font.Color = RGB(255, 255, 255)
         .Font.Bold = True
         .Font.Size = FS_BODY
         .HorizontalAlignment = xlCenter
@@ -1978,7 +2147,7 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     Next j
     With ws.Range(ws.Cells(rNum, cLbl), ws.Cells(rNum, cLast))
         .Value = a
-        .Font.Size = FS_NUM: .Font.Color = cNum
+        .Font.Size = FS_NUM
         .HorizontalAlignment = xlCenter
     End With
 
@@ -1997,6 +2166,7 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         .Value = a
         .HorizontalAlignment = xlLeft
         .Font.Size = FS_BODY
+        .Font.Color = C_“≈ —“
     End With
     ' отступы Ч сплошными кусками одного отступа, не по €чейке
     Dim нач As Long, отс As Long
@@ -2027,15 +2197,16 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     rng.Value = a
     rng.HorizontalAlignment = xlCenter
     rng.Font.Size = FS_BODY
+    rng.Font.Color = C_“≈ —“
     ‘орматы„исел ws, rData, cData, vals
 
     ' прочерки вместо пустых Ч серым
     ' (SpecialCells на одной €чейке берЄт весь лист Ч еЄ провер€ем сами)
     If rng.Cells.Count = 1 Then
-        If VarType(rng.Value) = vbString Then rng.Font.Color = cNum
+        If VarType(rng.Value) = vbString Then rng.Font.Color = C_ѕ–ќ„≈– 
     Else
         On Error Resume Next
-        rng.SpecialCells(xlCellTypeConstants, xlTextValues).Font.Color = cNum
+        rng.SpecialCells(xlCellTypeConstants, xlTextValues).Font.Color = C_ѕ–ќ„≈– 
         On Error GoTo 0
     End If
 
@@ -2046,39 +2217,22 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     Next ri
     With ws.Range(ws.Cells(rData, 1), ws.Cells(rLast, 1))
         .Value = a
-        .Font.Size = FS_NUM: .Font.Color = cNum
+        .Font.Size = FS_NUM
         .HorizontalAlignment = xlCenter
     End With
 
-    ' ---------- подсветка итогов ----------
-    '  расим только итоги: детализаци€ остаЄтс€ белой, еЄ держат серые границы.
-    ReDim m ласс—тр(1 To nOrd)
-    ReDim m ласс ол(1 To nCOrd)
-    For ci = 1 To nCOrd
-        j = cOrd(ci)
-        If cType(j) = LT_GRAND Then
-            m ласс ол(ci) = "G"
-        ElseIf cType(j) = LT_SUBTOTAL Then
-            m ласс ол(ci) = "S"
-        Else
-            m ласс ол(ci) = ""
-        End If
-    Next ci
+    ' ---------- итоги жирным, цвета Ч по палитре ----------
     For ri = 1 To nOrd
-        i = mOrd(ri)
-        If mType(i) = LT_GRAND Then
-            m ласс—тр(ri) = "G"
-        ElseIf m–одитель(i) Then
-            m ласс—тр(ri) = "S" & mDepth(i)
-        Else
-            m ласс—тр(ri) = ""
+        If Len(m ласс—тр(ri)) > 0 Then
+            ws.Range(ws.Cells(rData + ri - 1, cLbl), ws.Cells(rData + ri - 1, cLast)).Font.Bold = True
         End If
     Next ri
-
-    «акрасить“ело ws, rData, rLast, cLbl, cData, cLast
-
-    ' ---------- границы ----------
-    √раницы ws.Range(ws.Cells(rHdr, 1), ws.Cells(rLast, cLast))
+    For ci = 1 To nCOrd
+        If Len(m ласс ол(ci)) > 0 Then
+            ws.Range(ws.Cells(rData, cData + ci - 1), ws.Cells(rLast, cData + ci - 1)).Font.Bold = True
+        End If
+    Next ci
+    ѕокрасить ws, rHdr, rNum, rData, rLast, cLbl, cData, cLast
 
     ' ---------- геометри€ ----------
     ws.Columns(1).ColumnWidth = 4
@@ -2353,42 +2507,44 @@ Private Sub  опировать‘ормат”слови€(fc As Object, n As Object)
     On Error GoTo 0
 End Sub
 
-' —трока итога Ч целиком; колонки итогов Ч сплошными кусками одного цвета.
+' —троки итогов Ч целиком, колонки итогов Ч поверх; всЄ сплошными кусками
+' одного цвета, а не по €чейке.
 Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As Long, _
                           ByVal cLbl As Long, ByVal cData As Long, ByVal cLast As Long)
 
     Dim ri As Long, ci As Long, нач As Long, n As Long
-    Dim фон—тр() As Double, фон() As Double
+    Dim база() As Long, цв() As Long
 
     n = rLast - rData + 1
-    ReDim фон—тр(1 To n)
-    ReDim фон(1 To n + 1)
+    ReDim база(1 To n + 1)
+    ReDim цв(1 To n + 1)
 
     For ri = 1 To n
-        фон—тр(ri) = ‘он—троки(m ласс—тр(ri))
-        If фон—тр(ri) >= 0 Then
-            With ws.Range(ws.Cells(rData + ri - 1, cLbl), ws.Cells(rData + ri - 1, cLast))
-                .Interior.Color = ќттенок(cHead, фон—тр(ri))
-                .Font.Bold = True
+        база(ri) = ÷вет–оли(m ласс—тр(ri), "")
+    Next ri
+    база(n + 1) = -2
+    нач = 1
+    For ri = 2 To n + 1
+        If база(ri) <> база(нач) Then
+            With ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Interior
+                If база(нач) >= 0 Then .Color = база(нач) Else .Pattern = xlNone
             End With
+            нач = ri
         End If
     Next ri
 
     For ci = 1 To UBound(m ласс ол)
         If Len(m ласс ол(ci)) > 0 Then
             For ri = 1 To n
-                фон(ri) = ‘он олонки(m ласс ол(ci), фон—тр(ri))
+                цв(ri) = ÷вет–оли(m ласс—тр(ri), m ласс ол(ci))
             Next ri
-            фон(n + 1) = -2
+            цв(n + 1) = -2
             нач = 1
             For ri = 2 To n + 1
-                If фон(ri) <> фон(нач) Then
-                    If фон(нач) >= 0 Then
-                        With ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
-                                      ws.Cells(rData + ri - 2, cData + ci - 1))
-                            .Interior.Color = ќттенок(cHead, фон(нач))
-                            .Font.Bold = True
-                        End With
+                If цв(ri) <> цв(нач) Then
+                    If цв(нач) >= 0 Then
+                        ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
+                                 ws.Cells(rData + ri - 2, cData + ci - 1)).Interior.Color = цв(нач)
                     End If
                     нач = ri
                 End If
@@ -2396,6 +2552,28 @@ Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As L
         End If
     Next ci
 
+End Sub
+
+' ћетки ролей кусками: строки (столбец A) или колонки (строка нумерации)
+Private Sub ѕометить уски(ws As Worksheet, ByVal r0 As Long, ByVal c0 As Long, _
+                          ByVal n As Long, ByVal строки As Boolean)
+    Dim i As Long, нач As Long, м() As String
+    ReDim м(1 To n + 1)
+    For i = 1 To n
+        If строки Then м(i) = ћетка—троки(m ласс—тр(i)) Else м(i) = "C" & m ласс ол(i)
+    Next i
+    м(n + 1) = "#"
+    нач = 1
+    For i = 2 To n + 1
+        If м(i) <> м(нач) Then
+            If строки Then
+                ѕометить ws.Range(ws.Cells(r0 + нач - 1, c0), ws.Cells(r0 + i - 2, c0)), м(нач)
+            Else
+                ѕометить ws.Range(ws.Cells(r0, c0 + нач - 1), ws.Cells(r0, c0 + i - 2)), м(нач)
+            End If
+            нач = i
+        End If
+    Next i
 End Sub
 
 ' ќбъединение одинаковых заголовков по горизонтали и Ђвис€щихї Ч по вертикали
