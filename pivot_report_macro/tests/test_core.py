@@ -66,10 +66,13 @@ def render(root, depth, layout, subt, repeat, grand, info, blanks):
                     if repeat or not shown[a - 1]:
                         put(c, a, path[a - 1], CT_ITEM)
                         shown[a - 1] = True
-            put(c, d, node.name, CT_ITEM)
+            # Итоги вверху: строка родителя — это и есть итог, Excel отдаёт её
+            # как линию промитога, подпись — просто имя без «Итог»
+            top_sub = (not leaf) and subt == 'top'
+            put(c, d, node.name, CT_SUB if top_sub else CT_ITEM)
             hv = leaf or subt == 'top'
             kind = 'node' if (leaf or subt != 'bottom') else 'header'
-            rows.append([LT_REG, hv, c, kind, tuple(path)])
+            rows.append([LT_SUB if top_sub else LT_REG, hv, c, kind, tuple(path)])
             for a in range(len(shown)):
                 if a >= d - 1:
                     shown[a] = True
