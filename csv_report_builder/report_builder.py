@@ -21,7 +21,7 @@
     скопировать формулу в первую ячейку диапазона и протянуть вниз (table.formulas: live — формулы прямо в ячейках);
   • раскраска Δ и Δ% мягкой цветовой шкалой (рост — красный, снижение — зелёный; можно наоборот),
     по умолчанию — заливкой ячеек (без условного форматирования), можно — условным форматированием;
-  • плоские таблицы: строка «Итого» над шапкой (формула SUBTOTAL по видимым строкам — на листе «Формулы»), автофильтр;
+  • плоские таблицы: строка «Итого» сразу под шапкой, вне автофильтра (формула SUBTOTAL по видимым строкам — на листе «Формулы»), автофильтр;
   • ширина колонок по содержимому, закреплённая шапка, печать по ширине, «Страница N из M», ссылки
     «← Содержание» на каждом листе.
 
@@ -96,7 +96,7 @@ DEFAULTS = {
     "table": {
         "compare": "auto",             # auto — добавить Δ / Δ% для пар «X 2026 / X 2025»; off — не добавлять
         "formulas": "values",          # values — в ячейках числа, формулы — текстом на листе «Формулы» | live
-        "totals": "auto",              # плоские таблицы: auto/on — строка «Итого» над шапкой; off — нет
+        "totals": "auto",              # плоские таблицы: auto/on — строка «Итого» под шапкой; off — нет
         "autofilter": True,            # плоские таблицы
         "sort": None,                  # «-Сумма 2026» — по убыванию; «Наименование» — по возрастанию
         "hierarchy_sort": "auto",      # иерархия: auto — дети по убыванию главной метрики; off — порядок CSV
@@ -821,14 +821,13 @@ def write_sheet(ws, rep, fc, cfg, st):
     is_total = [isinstance(v, str) and bool(TOTAL_RE.match(v)) for v in first_col_text] if not rep.hierarchy else [False] * n
     if str(table.get("totals", "auto")).lower() == "auto" and any(is_total):
         totals_on = False
-    row = 5
-    total_row = None
-    if totals_on:
-        total_row, row = row, row + 1
+    # строки: шапка -> «Итого» -> номера колонок (на них автофильтр) -> данные;
+    # «Итого» стоит под шапкой, но вне диапазона фильтра — сортировка и фильтр его не трогают
     two_level = any(c.group for c in cols)
-    head1, head2 = row, row + (1 if two_level else 0)
-    numbers_row = head2 + 1 if table.get("column_numbers", True) else None
-    first_data = (numbers_row or head2) + 1
+    head1, head2 = 5, 5 + (1 if two_level else 0)
+    total_row = head2 + 1 if totals_on else None
+    numbers_row = (total_row or head2) + 1 if table.get("column_numbers", True) else None
+    first_data = (numbers_row or total_row or head2) + 1
     last_data = first_data + n - 1
 
     # --- шапка
@@ -942,7 +941,7 @@ def write_sheet(ws, rep, fc, cfg, st):
                 cell.fill = key_fill
         ws.row_dimensions[r].height = 18.75 * size / 14
 
-    # --- строка «Итого» над шапкой (SUBTOTAL 109 — только видимые после фильтра строки)
+    # --- строка «Итого» под шапкой (SUBTOTAL 109 — только видимые после фильтра строки)
     if total_row:
         label_col = col_idx[id(cols[0])]
         if rep.row_numbers:
@@ -1039,7 +1038,7 @@ def write_sheet(ws, rep, fc, cfg, st):
 
     # --- внешняя рамка таблицы (палитра B: внешняя #9AA5B1, внутренние #D3D9DF)
     if P["outer_border"] and n:
-        frame(ws, total_row or head1, last_data, 1, ncols, P["outer_border"])
+        frame(ws, head1, last_data, 1, ncols, P["outer_border"])
 
     # --- ширины
     widths = {}
@@ -1101,8 +1100,9 @@ def write_sheet(ws, rep, fc, cfg, st):
             lead += 1
         fcols = lead if 0 < lead <= 3 and sum(widths[col_idx[id(c)]] for c in cols[:lead]) <= 100 else (1 if lead else 0)
     ws.freeze_panes = ws.cell(first_data, offset + 1 + int(fcols))
-    filter_row = numbers_row or head2
-    if not rep.hierarchy and table.get("autofilter", True) and n:
+    filter_row = numbers_row or total_row or head2
+    # без строки номеров фильтр встал бы на «Итого» — тогда без фильтра
+    if not rep.hierarchy and table.get("autofilter", True) and n and (numbers_row or not total_row):
         ws.auto_filter.ref = f"A{filter_row}:{get_column_letter(ncols)}{last_data}"
     total_width = sum(w for ci, w in widths.items() if not ws.column_dimensions[get_column_letter(ci)].hidden)
     paper = style.get("paper", "auto")
@@ -1691,7 +1691,7 @@ def write_template(src_dir, cfg, path):
         "table:",
         "  compare: auto           # auto — добавить Δ и Δ% для пар «X 2026 / X 2025» | off",
         "  formulas: values        # values — в ячейках числа, формулы текстом на листе «Формулы» | live",
-        "  totals: auto            # плоские таблицы: строка «Итого» над шапкой (по фильтру) | off",
+        "  totals: auto            # плоские таблицы: строка «Итого» под шапкой | off",
         "  autofilter: true",
         "  # sort: \"-Сумма 2026\"   # минус — по убыванию",
         "  hierarchy_sort: auto    # иерархия (колонка «Уровень»): дети по убыванию главной метрики | off",
