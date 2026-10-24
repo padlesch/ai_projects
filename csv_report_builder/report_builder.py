@@ -25,6 +25,15 @@
   • ширина колонок по содержимому, закреплённая шапка, печать по ширине, «Страница N из M», ссылки
     «← Содержание» на каждом листе.
 
+Уточняющие вопросы: при запуске в консоли скрипт анализирует папку и спрашивает только то, в чём не уверен или
+чего нет в конфиге — заголовок, подзаголовок, период, «рост — хорошо или плохо», вид колонок, понятных лишь по
+цифрам (штуки / деньги / другое число / процент / код), подписи технических имён (MO_NAME), имена листов.
+Enter — вариант в скобках, «!» — принять все остальные. Ответы сохраняются в report.yaml (прежний — в .bak),
+при следующем запуске спрашивается только новое. --ask — спросить всё заново, --no-ask — без вопросов.
+
+Шапка колонок окрашена по виду (палитра B): штуки — голубой, деньги — зелёный, прочие числа и проценты —
+бирюзовый, Δ / Δ% — песочный, разрезы — нейтральный серо-голубой.
+
 Всё, что нужно вписать руками (названия, описания, подписи колонок, какие колонки метрики, что красить),
 задаётся в конфиге report.yaml в папке с CSV. Шаблон с найденными файлами и колонками:
   python report_builder.py "D:\\папка_с_csv" --init       -> создаст report.yaml (существующий не трогает)
@@ -115,8 +124,12 @@ PALETTES = {
     "B": {
         "text": "1F1F1F", "title": "1B3A5C", "subtitle": "2D6A73", "muted": "555F69", "service": "555F69",
         "numbers": "66707A", "subrow": "555F69", "link": "1B3A5C", "alert": "9E3423",
-        "head_fill": "E8ECF0", "head_text": "1B3A5C", "head_delta_text": "1B3A5C", "head_kind_fills": {},
-        "group_fill_year": "E8ECF0", "group_fill_delta": "E8ECF0",
+        "head_fill": "E8ECF0", "head_text": "1B3A5C", "head_delta_text": "1B3A5C",
+        "head_kind_fills": {"count": "DCE8F3",         # штуки — голубой
+                            "money": "DCEAD3",         # деньги — шалфей
+                            "number": "D6ECEC", "pct": "D6ECEC", "pct_points": "D6ECEC",   # прочие — бирюзовый
+                            "delta": "FBF3E2", "delta_pct": "FBF3E2"},                     # Δ — песок светлый
+        "group_fill_year": "E8ECF0", "group_fill_delta": "FBF3E2",
         "levels": {0: "C9DCEC", 1: "DCE8F3", 2: "EAF1F8", 3: "EEF4EA"}, "level_deep": "F5F7F9",
         "total": "C9DCEC", "key_column": "ECEFF2",
         "head_border": "9AA5B1", "data_border": "D3D9DF", "outer_border": "9AA5B1",
@@ -175,20 +188,23 @@ FMT = {
     "text": "@",
 }
 FMT_PCT_CAP = '"> 200%"'
-CHAR_W, HEAD_CHAR_W = 1.3, 1.45   # ширина символа (данные / жирная шапка) в единицах Excel при размере 14
+CHAR_W, HEAD_CHAR_W = 1.3, 1.65   # ширина символа (данные / жирная шапка) в единицах Excel при размере 14
 
 # ---------------------------------------------------------------- распознавание по имени колонки
 RX = {
     "level": re.compile(r"^(уровень|level|lvl)$", re.I),
     "name": re.compile(r"^(наименование|название|name)$", re.I),
     "subrow": re.compile(r"^из них$", re.I),
-    "id": re.compile(r"(^|[_\s])(id|code|код|кода|инн|огрн|кпп|снилс|окпо|окато|октмо|gid|pat_id|полис|номер)"
+    "id": re.compile(r"(^|[_\s])(id|code|cod|код|кода|инн|inn|огрн|ogrn|кпп|kpp|снилс|snils|окпо|okpo|окато|okato|"
+                     r"октмо|oktmo|gid|pat_id|полис|polis|enp|номер|num|nom)"
                      r"($|[_\s])|^(№|n|no|nn|пп|№ п/п)$", re.I),
     "period": re.compile(r"^(год|year|месяц|month|квартал|quarter|период|period|дата|date)\b", re.I),
     "delta_pct": re.compile(r"^(Δ|δ)\s*%|^(дельта|delta|изм\w*)\s*%", re.I),
     "delta": re.compile(r"^(Δ|δ|дельта|delta|diff|разница|изм)", re.I),
     "pct": re.compile(r"%|процент|доля|pct|percent|share|удельн", re.I),
-    "money": re.compile(r"сумм|руб|стоим|цена|выручк|затрат|тариф|amount|price|cost|revenue|₽", re.I),
+    "money": re.compile(r"сумм|руб|стоим|цена|выручк|затрат|тариф|оплат|amount|price|cost|revenue|₽", re.I),
+    "count": re.compile(r"случа|пациент|кол-?во|количеств|\bшт\b|услуг|посещ|визит|обращ|госпит|койк|человек|"
+                        r"count|qty|quantity|число", re.I),
 }
 YEAR_RE = re.compile(r"^(?P<pre>.*?)[\s_,]*(?P<year>(?:19|20)\d\d)(?!\d)(?P<post>.*)$")
 SUBROW_RE = re.compile(r"^\s*из них\b", re.I)
@@ -327,6 +343,10 @@ class Col:
         self.description = ""
         self.cap = False           # Δ% > cap -> «> 200%»
         self.hint = None           # формула для справки у колонок из CSV (в ячейках — значения CSV)
+        self.kind_source = "name"  # config | name | values — по значениям = не уверен, спросить
+        self.maybe_code = False    # целые без подсказки в имени, все разные — возможно, код, а не метрика
+        self.sample = []           # примеры значений для вопросов
+        self.nosum = False         # Δ от «другого числа» — не суммировать
 
     @property
     def is_metric(self):
@@ -334,7 +354,8 @@ class Col:
 
     @property
     def additive(self):
-        return self.is_metric and self.kind in ("count", "money", "number", "delta")
+        # «другое число» (балл, коэффициент) и его Δ в «Итого» не суммируются
+        return self.is_metric and self.kind in ("count", "money", "delta") and not self.nosum
 
 
 def norm(text):
@@ -363,6 +384,7 @@ def analyze_column(name, series, rule):
             role = "dimension"
     col.role = role
 
+    col.sample = list(dict.fromkeys(nonempty.head(200)))[:3]
     if role == "metric":
         if kind is None:
             fractional = bool(((nums.dropna() % 1) != 0).any())
@@ -372,10 +394,17 @@ def analyze_column(name, series, rule):
                 kind = "delta"
             elif all_pct_strings or RX["pct"].search(name):
                 kind = "pct" if (all_pct_strings or nums.abs().max() <= 1.5) else "pct_points"
-            elif RX["money"].search(name) or fractional:
+            elif RX["money"].search(name):
                 kind = "money"
-            else:
+            elif RX["count"].search(name):
                 kind = "count"
+            else:                       # по имени не понять — решаем по значениям и потом уточняем
+                kind = "money" if fractional else "count"
+                col.kind_source = "values"
+                vals = nums.dropna()
+                col.maybe_code = (not fractional and len(vals) >= 5 and vals.is_unique and (vals >= 0).all())
+        else:
+            col.kind_source = "config"
         col.kind = kind
         col.values = [None if pd.isna(v) else (int(v) if kind == "count" and float(v).is_integer() else float(v))
                       for v in nums]
@@ -455,6 +484,7 @@ def apply_year_groups(cols, period, compare):
         if compare == "auto" and not has_delta:
             d = Col(f"Δ {a.base}")
             d.role, d.kind, d.formula, d.fmt = "metric", "delta", ("diff", a, b), a.fmt
+            d.nosum = a.kind == "number"
             d.values = [None if (x is None and y is None) else round((x or 0) - (y or 0), 6)
                         for x, y in zip(a.values, b.values)]
             d.description = f"добавлено: {a.name} − {b.name}"
@@ -1438,6 +1468,199 @@ def write_help(ws, rows, st, style):
     print_setup(ws, style, "4:4")
 
 
+# ---------------------------------------------------------------- уточняющие вопросы
+TECH_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$|^[A-Z][A-Z0-9]{2,}$")
+KIND_CHOICES = [
+    ("count", "штуки (случаи, пациенты, количество) — голубая шапка"),
+    ("money", "деньги — зелёная шапка"),
+    ("number", "другое число (коэффициент, средний чек, баллы) — бирюзовая шапка"),
+    ("pct", "процент / доля — бирюзовая шапка"),
+    ("dimension", "не метрика: код, номер, разрез — не суммируется и не красится"),
+]
+
+
+class Asker:
+    """Вопрос в консоли: Enter — вариант в скобках, «!» — принять все остальные варианты по умолчанию."""
+
+    def __init__(self, inp=input, out=print):
+        self.inp, self.out, self.auto = inp, out, False
+
+    def _read(self, prompt):
+        if self.auto:
+            return ""
+        try:
+            answer = self.inp(prompt).strip()
+        except EOFError:
+            self.auto = True
+            return ""
+        if answer == "!":
+            self.auto = True
+            return ""
+        return answer
+
+    def text(self, question, default=""):
+        answer = self._read(f"{question} [{default}]: ")
+        return answer if answer else default
+
+    def choice(self, question, options, default):
+        self.out(question)
+        keys = [k for k, _ in options]
+        for i, (_, label) in enumerate(options, start=1):
+            self.out(f"   {i}. {label}{'   <- сейчас' if keys[i - 1] == default else ''}")
+        while True:
+            answer = self._read(f"   номер [{keys.index(default) + 1}]: ")
+            if not answer:
+                return default
+            if answer.isdigit() and 1 <= int(answer) <= len(options):
+                return keys[int(answer) - 1]
+            self.out(f"   нужен номер от 1 до {len(options)}")
+
+
+def load_raw(path):
+    """Конфиг как он записан в файле (без значений по умолчанию) — в него дописываются ответы."""
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        if path.lower().endswith(".json"):
+            return json.load(f) or {}
+        if yaml is None:
+            sys.exit("Для конфига .yaml нужен pyyaml: pip install pyyaml (или используйте report.json)")
+        return yaml.safe_load(f) or {}
+
+
+def plan_questions(src_dir, cfg, raw, force=False):
+    """Что спросить: только то, чего нет в конфиге и в чём скрипт не уверен.
+    force (--ask) — спросить всё заново; прежние ответы станут вариантами по умолчанию."""
+    book_raw = {} if force else (raw.get("book") or {})
+    files_raw = {} if force else (raw.get("files") or {})
+    rules_raw = {} if force else (raw.get("columns") or {})
+    if force:            # распознать колонки заново, без сохранённых ответов про вид
+        cfg = dict(cfg, columns={k: {kk: vv for kk, vv in (v or {}).items() if kk not in ("kind", "role")}
+                                 for k, v in (cfg.get("columns") or {}).items()})
+    reports, broken = [], []
+    for f, fc in discover(src_dir, cfg):
+        try:
+            reports.append((f, prepare(os.path.join(src_dir, f), f, fc, cfg["book"].get("period") or "")))
+        except Exception as err:   # о битых файлах только сообщаем
+            broken.append((f, str(err)))
+    plan = {"reports": reports, "broken": broken, "book": [], "kinds": [], "labels": [], "files": []}
+    has_years = any(c.year for _, r in reports for c in r.metrics)
+    has_delta = any(c.kind in ("delta", "delta_pct") for _, r in reports for c in r.metrics)
+    for key in ("title", "subtitle") + (("period",) if has_years else ()) :
+        if key not in book_raw:
+            plan["book"].append(key)
+    if (has_delta or has_years) and (force or "positive_is" not in (raw.get("coloring") or {})):
+        plan["book"].append("positive_is")
+    seen = set()
+    for _, r in reports:
+        for c in r.columns:
+            if c.formula or c.name in seen or rules_for(rules_raw, c.name):
+                continue
+            seen.add(c.name)
+            if c.is_metric and c.kind_source == "values":
+                plan["kinds"].append(c)
+            if TECH_NAME.match(c.name):
+                plan["labels"].append(c)
+    for f, r in reports:
+        if not any(pattern_match(p, f) or pattern_match(p, os.path.splitext(f)[0]) for p in files_raw):
+            plan["files"].append((f, r))
+    plan["count"] = len(plan["book"]) + len(plan["kinds"]) + len(plan["labels"]) + 2 * len(plan["files"])
+    return plan
+
+
+def interview(src_dir, cfg, raw, asker, force=False):
+    """Задаёт вопросы по плану и возвращает конфиг с ответами (для записи в report.yaml)."""
+    plan = plan_questions(src_dir, cfg, raw, force)
+    out = asker.out
+    raw = copy.deepcopy(raw)
+    out(f"\nПапка: {src_dir}")
+    for f, r in plan["reports"]:
+        kinds = {}
+        for c in r.metrics:
+            if not c.formula:
+                kinds[c.kind] = kinds.get(c.kind, 0) + 1
+        what = ", ".join(f"{KIND_RU.get(k, k)} {v}" for k, v in kinds.items()) or "метрик нет"
+        out(f"  • {f}: {'иерархия' if r.hierarchy else 'таблица'}, строк {r.n_rows}; {what}")
+    for f, err in plan["broken"]:
+        out(f"  • {f}: не прочитан — {err}")
+    if not plan["count"]:
+        out("Уточнять нечего — всё есть в конфиге.")
+        return raw, False
+    out(f"\nНужно уточнить {plan['count']} пунктов. Enter — оставить вариант в скобках, «!» — принять все остальные.")
+
+    book = raw.setdefault("book", {})
+    folder = os.path.basename(src_dir.rstrip("\\/"))
+    if "title" in plan["book"]:
+        book["title"] = asker.text("\nЗаголовок отчёта (вверху каждого листа)", book.get("title") or folder)
+    if "subtitle" in plan["book"]:
+        book["subtitle"] = asker.text("Подзаголовок — отбор / источник (например «ЗЛ, ДЗМ, взрослые»)",
+                                      book.get("subtitle") or "")
+    if "period" in plan["book"]:
+        book["period"] = asker.text("Период к годам в шапке (например «9м» -> «2026 9м»)", book.get("period") or "")
+    if "positive_is" in plan["book"]:
+        raw.setdefault("coloring", {})["positive_is"] = asker.choice(
+            "\nРост показателей в этих отчётах — это:",
+            [("bad", "плохо — рост красный, снижение зелёное (затраты, объёмы оплаты)"),
+             ("good", "хорошо — рост зелёный, снижение красное (выручка, выполнение плана)")],
+            (raw.get("coloring") or {}).get("positive_is", "bad"))
+
+    columns = raw.setdefault("columns", {})
+    if plan["kinds"]:
+        out("\nКолонки, вид которых понятен только по цифрам (от вида зависят цвет шапки, формат и итоги):")
+    for c in plan["kinds"]:
+        before = rules_for(raw.get("columns") or {}, c.name)
+        default = ("dimension" if before.get("role") == "dimension" else before.get("kind")) \
+            or ("dimension" if c.maybe_code else c.kind)
+        default = default if default in dict(KIND_CHOICES) else c.kind
+        note = " — все значения разные, похоже на код" if c.maybe_code else ""
+        kind = asker.choice(f"\n«{c.name}», например: {', '.join(map(str, c.sample))}{note}", KIND_CHOICES, default)
+        rule = columns.setdefault(c.name, {})
+        rule.pop("role" if kind != "dimension" else "kind", None)
+        rule.update({"role": "dimension"} if kind == "dimension" else {"kind": kind, "role": "metric"})
+    if plan["labels"]:
+        out("\nТехнические имена колонок — как подписать в шапке (Enter — оставить как есть):")
+    for c in plan["labels"]:
+        label = asker.text(f"  {c.name} (например: {', '.join(map(str, c.sample))})",
+                           rules_for(raw.get("columns") or {}, c.name).get("label") or c.name)
+        columns.setdefault(c.name, {})["label"] = label
+
+    files = raw.setdefault("files", {})
+    if plan["files"]:
+        out("\nЛисты (имя листа — до 31 символа):")
+    for f, r in plan["files"]:
+        stem = os.path.splitext(f)[0]
+        no, rest = report_number(stem)
+        before = files.get(f) or {}
+        sheet = asker.text(f"  {f}: имя листа", before.get("sheet") or (f"{no} {rest}" if no else rest)[:31])
+        description = asker.text("     описание под заголовком (Enter — пропустить)", before.get("description") or "")
+        files[f] = dict(before, sheet=sheet[:31])
+        if description:
+            files[f]["description"] = description
+    return raw, True
+
+
+KIND_RU = {"count": "штуки", "money": "деньги", "number": "числа", "pct": "проценты", "pct_points": "проценты",
+           "delta": "Δ", "delta_pct": "Δ%"}
+
+
+def save_answers(raw, path):
+    """Записывает конфиг с ответами; прежний файл — в .bak (комментарии в нём сохраняются)."""
+    if os.path.exists(path):
+        os.replace(path, path + ".bak")
+        print(f"Прежний конфиг сохранён: {path}.bak")
+    if path.lower().endswith(".json") or yaml is None:
+        path = os.path.splitext(path)[0] + ".json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# Настройки отчёта: ответы на вопросы report_builder.py. Править можно вручную;\n"
+                    "# все ключи — в report.example.yaml. Повторить вопросы: --ask\n")
+            yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    print(f"Ответы сохранены: {path}")
+    return path
+
+
 # ---------------------------------------------------------------- шаблон конфига
 def yq(text):
     return json.dumps(str(text), ensure_ascii=False)
@@ -1519,6 +1742,8 @@ def main():
     p.add_argument("--config", help="конфиг .yaml/.json (по умолчанию report.yaml в папке, если есть)")
     p.add_argument("--init", action="store_true", help="создать шаблон report.yaml по найденным файлам")
     p.add_argument("--explain", action="store_true", help="показать распознанные колонки, без сборки")
+    p.add_argument("--ask", action="store_true", help="задать уточняющие вопросы, даже если всё уже в конфиге")
+    p.add_argument("--no-ask", action="store_true", help="не задавать вопросов (для запуска по расписанию)")
     args = p.parse_args()
     src = os.path.abspath(args.src)
     if not os.path.isdir(src):
@@ -1534,6 +1759,12 @@ def main():
             target = os.path.join(src, "report.template.yaml")
         write_template(src, cfg, target)
         return
+    # уточнения: по умолчанию — в консоли, если есть что спросить; ответы -> report.yaml
+    if not args.no_ask and not args.explain and (args.ask or sys.stdin.isatty()):
+        answers, changed = interview(src, cfg, load_raw(config_path), Asker(), force=args.ask)
+        if changed:
+            config_path = save_answers(answers, config_path or os.path.join(src, "report.yaml"))
+            cfg = load_config(config_path)
     out = args.out or cfg["book"].get("output") or src.rstrip("\\/") + ".xlsx"
     if os.path.exists(out) and not args.explain:
         try:

@@ -130,3 +130,62 @@ def test_palette_b_default_and_a_switch(hierarchy_dir):
     assert fill_of(ws.cell(8, 2)) == "F4B183"
     ws = build(hierarchy_dir, style={"colors": {"levels": {0: "112233"}}}).worksheets[1]
     assert fill_of(ws.cell(8, 2)) == "112233"
+
+
+@pytest.fixture
+def ambiguous_dir(tmp_path):
+    rows = [[f"ГКБ {i}", f"45{i}", 100 + i, 90 + i, f"{1.5 + i / 10:.1f}".replace(".", ","), 1000 + 7 * i]
+            for i in range(6)]
+    write_csv(tmp_path / "mo.csv", ["MO_NAME", "OKATO_REG", "Случаи 2026", "Случаи 2025", "Балл", "Показатель"], rows)
+    return tmp_path
+
+
+def answers(*items):
+    it = iter(items)
+    return R.Asker(inp=lambda prompt: next(it), out=lambda *a: None)
+
+
+def test_plan_asks_only_unsure_things(ambiguous_dir):
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    plan = R.plan_questions(str(ambiguous_dir), cfg, {})
+    assert [c.name for c in plan["kinds"]] == ["Балл", "Показатель"]      # «Случаи» понятны по имени
+    assert plan["kinds"][1].maybe_code                                     # все значения разные
+    assert {c.name for c in plan["labels"]} == {"MO_NAME", "OKATO_REG"}
+    assert "positive_is" in plan["book"] and "period" in plan["book"]
+
+
+def test_interview_saves_answers_and_stops_asking(ambiguous_dir):
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    raw, changed = R.interview(str(ambiguous_dir), cfg, {}, answers(
+        "Анализ МО", "", "9м", "2",          # заголовок, подзаголовок, период, рост — хорошо
+        "3", "",                             # Балл — другое число; Показатель — по умолчанию (код)
+        "МО", "",                            # подписи техн. имён
+        "МО", ""))                           # имя листа, описание
+    assert changed
+    assert raw["book"] == {"title": "Анализ МО", "subtitle": "", "period": "9м"}
+    assert raw["coloring"]["positive_is"] == "good"
+    assert raw["columns"]["Балл"] == {"kind": "number", "role": "metric"}
+    assert raw["columns"]["Показатель"] == {"role": "dimension"}
+    assert raw["columns"]["MO_NAME"]["label"] == "МО"
+    assert raw["files"]["mo.csv"] == {"sheet": "МО"}
+    cfg = R.deep_merge(R.DEFAULTS, raw)
+    assert R.plan_questions(str(ambiguous_dir), cfg, raw)["count"] == 0
+
+
+def test_bang_accepts_all_defaults(ambiguous_dir):
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    raw, _ = R.interview(str(ambiguous_dir), cfg, {}, answers("!"))
+    assert raw["book"]["title"] == ambiguous_dir.name
+    assert raw["columns"]["Показатель"] == {"role": "dimension"}
+
+
+def test_column_group_colours_and_no_sum_for_numbers(ambiguous_dir):
+    wb = build(ambiguous_dir, columns={"Балл": {"kind": "number"}, "Показатель": {"role": "dimension"}})
+    ws = wb.worksheets[1]
+    heads = {}
+    for c in range(1, ws.max_column + 1):       # первое вхождение подписи («Случаи» есть и в 2026, и в Δ)
+        heads.setdefault(ws.cell(7, c).value or ws.cell(6, c).value,
+                         fill_of(ws.cell(7, c)) or fill_of(ws.cell(6, c)))
+    assert heads["Случаи"] == "DCE8F3" and heads["Балл"] == "D6ECEC"
+    total = {ws.cell(6, c).value: ws.cell(5, c).value for c in range(1, ws.max_column + 1)}
+    assert total["Балл"] is None                              # баллы в «Итого» не складываются
