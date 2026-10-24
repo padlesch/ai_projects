@@ -7,7 +7,6 @@ Option Explicit
 '  ОформитьОтчёт        — встать в любую ячейку сводной и запустить
 '  ОформитьОтчётБезВопросов — то же молча, отчёт новым листом этой книги
 '  ПалитраОтчёта         — сменить палитру готового отчёта (активный лист)
-'  ПалитраСледующая      — переключить палитру по кругу
 '
 '  Что делает:
 '   * снимает со сводной значения и структуру — в любом макете:
@@ -20,7 +19,6 @@ Option Explicit
 '   * несколько мер -> каждая мера отдельным блоком столбцов;
 '   * числовые форматы мер (%, валюта, дроби) берутся из сводной;
 '   * строка фильтров сводной под заголовком;
-'   * группировка строк по уровням (кнопки 1-2-3... слева) — свернуть до нужной глубины;
 '   * заголовок, нумерация столбцов и строк, Arial Narrow, серые границы.
 '
 '  На листе после построения нет ничего, кроме отчёта: ни панелей,
@@ -42,7 +40,7 @@ Private Const TXT_SUBTOT    As String = "Итог"
 Private Const TXT_EMPTY     As String = "(пусто)"
 Private Const MARGIN_CM     As Double = 0.3
 Private Const ПАЛ_ПО_УМОЛЧ  As Long = 1         ' палитра нового отчёта
-Private Const ГРУППИРОВАТЬ  As Boolean = True   ' кнопки свёртки уровней слева
+Private Const ГРУППИРОВАТЬ  As Boolean = False  ' True — кнопки свёртки уровней слева
 
 '--- типы строк/столбцов сводной (как XlPivotLineType) --------------------
 Private Const LT_REGULAR    As Long = 0
@@ -415,18 +413,7 @@ Public Sub ПалитраОтчёта()
     ПалитраНомер CLng(otvet)
 End Sub
 
-Public Sub ПалитраСледующая()
-    Dim тек As Long
-    тек = ТекущаяПалитра(ActiveSheet)
-    If тек = 0 Then
-        MsgBox "На активном листе не найден отчёт, построенный макросом.", vbExclamation
-        Exit Sub
-    End If
-    ПалитраНомер тек Mod ЧислоПалитр() + 1
-End Sub
-
-' Можно повесить на кнопку панели быстрого доступа: ПалитраНомер 3
-Public Sub ПалитраНомер(ByVal n As Long)
+Private Sub ПалитраНомер(ByVal n As Long)
     If n < 1 Or n > ЧислоПалитр() Then Exit Sub
     If TypeName(ActiveSheet) <> "Worksheet" Then Exit Sub
     If Not ПерекраситьЛист(ActiveSheet, n) Then
@@ -1170,7 +1157,7 @@ End Function
 '  Не обращается к Excel — работает только с массивами in*, поэтому
 '  одинаково ведёт себя на любом макете и проверяется автотестами.
 '==========================================================================
-Public Sub ЯдроСтроки()
+Private Sub ЯдроСтроки()
 
     Dim i As Long, k As Long, q As Long, lv As Long, глуб As Long
     Dim посл As Long, s As String, база As String, прежГлуб As Long
@@ -1227,23 +1214,35 @@ Public Sub ЯдроСтроки()
                 If lv > 0 Then
                     s = inTxt(i, k)
                     If k = посл And mType(i) = LT_SUBTOTAL Then
-                        ' «Север Итог» — итог группы «Север», которая только
-                        ' что закончилась (или начнётся, если итоги вверху)
+                        ' Строка-итог бывает двух видов:
+                        '  * итоги внизу: «Север Итог» после детей — группа
+                        '    «Север» уже в стеке, имя берём из подписи без «Итог»;
+                        '  * итоги вверху: строка родителя «Север» сама является
+                        '    итогом (Excel так её и помечает) — подпись и есть имя
+                        '    НОВОЙ группы, старое имя из стека брать нельзя.
+                        ' Пользовательские итоги («Север Сумма») относятся
+                        ' к группе в стеке.
                         база = СуффиксИтога(s)
-                        If Len(база) > 0 Then
-                            If StrComp(база, стек(lv), vbTextCompare) <> 0 Then
-                                стек(lv) = база: стекR(lv) = 0: стекC(lv) = 0
-                            End If
-                        ElseIf Len(стек(lv)) = 0 Then
+                        If inCT(i, k) = CT_CUSTOMSUB Then
+                            mOwnCustom(i) = True
+                            If Len(стек(lv)) = 0 Then стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        ElseIf Len(база) > 0 And StrComp(база, стек(lv), vbTextCompare) = 0 Then
+                            ' итог внизу: группа та же, что в стеке
+                        Else
                             стек(lv) = s: стекR(lv) = i: стекC(lv) = k
                         End If
-                        If inCT(i, k) = CT_CUSTOMSUB Then mOwnCustom(i) = True
-                    Else
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
+                    ElseIf StrComp(s, стек(lv), vbTextCompare) <> 0 Or k = посл Then
+                        ' Новая подпись уровня — нижние уровни начинаются заново.
+                        ' Повтор той же подписи предка (табличный макет с
+                        ' «повторять подписи») группу не меняет и детей не сбрасывает.
                         стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
                     End If
-                    For q = lv + 1 To mMaxD
-                        стек(q) = "": стекR(q) = 0: стекC(q) = 0
-                    Next q
                     If lv > глуб Then глуб = lv
                 End If
             Next k
@@ -1309,19 +1308,19 @@ Private Function ТипСтроки(ByVal i As Long) As Long
     ТипСтроки = t
 End Function
 
-Public Function ЭтоОбщийИтог(ByVal s As String) As Boolean
+Private Function ЭтоОбщийИтог(ByVal s As String) As Boolean
     s = LCase$(Trim$(s))
     ЭтоОбщийИтог = (s = "общий итог" Or s = "grand total" Or s = LCase$(TXT_GRAND) _
                     Or s = LCase$(Trim$(mGrandTxt)))
 End Function
 
 ' Подпись общего итога: переименованная в сводной, иначе стандартная
-Public Function ТекстОбщегоИтога() As String
+Private Function ТекстОбщегоИтога() As String
     If Len(Trim$(mGrandTxt)) > 0 Then ТекстОбщегоИтога = mGrandTxt Else ТекстОбщегоИтога = TXT_GRAND
 End Function
 
 ' «Север Итог» -> «Север»; не итог -> ""
-Public Function СуффиксИтога(ByVal s As String) As String
+Private Function СуффиксИтога(ByVal s As String) As String
     Dim t As String, x As Variant
     t = Trim$(s)
     For Each x In Array(" итог", " total", " всего", " итого")
@@ -1420,7 +1419,7 @@ End Sub
 ' Ячейка, о которой сводная не сказала поле (бывает у итогов и на модели
 ' данных), получает уровень по месту на листе — если на этом месте
 ' (столбец + отступ) у остальных ячеек встречается ровно одно поле.
-Public Sub ДозаполнитьУровни()
+Private Sub ДозаполнитьУровни()
     Dim i As Long, k As Long, a As Long, n As Long, м As Long
     Dim место() As Long, ур() As Long, двояко() As Boolean
     ReDim место(1 To nR * nLbl + 1)
@@ -1528,7 +1527,7 @@ End Sub
 '  над своими детьми, общий итог — первой строкой. Сортировка устойчивая:
 '  внутри группы строки не перемешиваются.
 '==========================================================================
-Public Sub ПорядокСтрок()
+Private Sub ПорядокСтрок()
 
     Dim i As Long, k As Long, n As Long, r As Long, m As Long, a As Long
     Dim idx() As Long, ключ() As String, s As String
@@ -1644,7 +1643,7 @@ End Sub
 
 ' После упорядочивания: кто кому родитель, какие подписи показывать,
 ' уровень группировки строк.
-Public Sub ЯдроПослеПорядка()
+Private Sub ЯдроПослеПорядка()
 
     Dim p As Long, i As Long, k As Long, d As Long, q As Long, c As Long
     Dim свой() As String, пред As Long, приставка As Long, лв As Long
@@ -1772,7 +1771,7 @@ End Function
 '  ЯДРО: ШАПКА СТОЛБЦОВ
 '  Вход: cItem/cCnt/cType/cDF/cMeasLev/mMeas. Выход: dLev/dDepth/nLev.
 '==========================================================================
-Public Sub СобратьШапку()
+Private Sub СобратьШапку()
 
     Dim j As Long, k As Long, maxLev As Long
     Dim мера() As String, выносить As Boolean
@@ -1919,7 +1918,7 @@ End Sub
 ' итог оказывается в отдельной группе и уезжает вправо. Восстанавливаем путь
 ' по БЛИЖАЙШЕЙ обычной линии с этим элементом: итог стоит вплотную к своей
 ' группе, а одноимённые элементы других родителей — дальше.
-Public Sub ВосстановитьПутьИтогов(ByRef item() As String, ByRef cnt() As Long, _
+Private Sub ВосстановитьПутьИтогов(ByRef item() As String, ByRef cnt() As Long, _
                                   ByRef тип() As Long, ByVal n As Long, ByVal maxLev As Long)
     Dim j As Long, q As Long, k As Long, шаг As Long
     Dim посл As String, строка As Long, уровень As Long
@@ -1991,7 +1990,7 @@ End Function
 '==========================================================================
 '  ЯДРО: ПОРЯДОК СТОЛБЦОВ — итог группы левее её столбцов
 '==========================================================================
-Public Sub ПорядокСтолбцов()
+Private Sub ПорядокСтолбцов()
     Dim j As Long, ост() As Long, n As Long
     ReDim cOrd(1 To nC)
     nCOrd = 0

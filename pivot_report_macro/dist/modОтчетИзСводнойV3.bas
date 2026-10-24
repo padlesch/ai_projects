@@ -7,7 +7,6 @@ Option Explicit
 '  ќформитьќтчЄт        Ч встать в любую €чейку сводной и запустить
 '  ќформитьќтчЄтЅез¬опросов Ч то же молча, отчЄт новым листом этой книги
 '  ѕалитраќтчЄта         Ч сменить палитру готового отчЄта (активный лист)
-'  ѕалитра—ледующа€      Ч переключить палитру по кругу
 '
 '  „то делает:
 '   * снимает со сводной значени€ и структуру Ч в любом макете:
@@ -20,7 +19,6 @@ Option Explicit
 '   * несколько мер -> кажда€ мера отдельным блоком столбцов;
 '   * числовые форматы мер (%, валюта, дроби) берутс€ из сводной;
 '   * строка фильтров сводной под заголовком;
-'   * группировка строк по уровн€м (кнопки 1-2-3... слева) Ч свернуть до нужной глубины;
 '   * заголовок, нумераци€ столбцов и строк, Arial Narrow, серые границы.
 '
 '  Ќа листе после построени€ нет ничего, кроме отчЄта: ни панелей,
@@ -42,7 +40,7 @@ Private Const TXT_SUBTOT    As String = "»тог"
 Private Const TXT_EMPTY     As String = "(пусто)"
 Private Const MARGIN_CM     As Double = 0.3
 Private Const ѕјЋ_ѕќ_”ћќЋ„  As Long = 1         ' палитра нового отчЄта
-Private Const √–”ѕѕ»–ќ¬ј“№  As Boolean = True   ' кнопки свЄртки уровней слева
+Private Const √–”ѕѕ»–ќ¬ј“№  As Boolean = False  ' True Ч кнопки свЄртки уровней слева
 
 '--- типы строк/столбцов сводной (как XlPivotLineType) --------------------
 Private Const LT_REGULAR    As Long = 0
@@ -415,18 +413,7 @@ Public Sub ѕалитраќтчЄта()
     ѕалитраЌомер CLng(otvet)
 End Sub
 
-Public Sub ѕалитра—ледующа€()
-    Dim тек As Long
-    тек = “екуща€ѕалитра(ActiveSheet)
-    If тек = 0 Then
-        MsgBox "Ќа активном листе не найден отчЄт, построенный макросом.", vbExclamation
-        Exit Sub
-    End If
-    ѕалитраЌомер тек Mod „ислоѕалитр() + 1
-End Sub
-
-' ћожно повесить на кнопку панели быстрого доступа: ѕалитраЌомер 3
-Public Sub ѕалитраЌомер(ByVal n As Long)
+Private Sub ѕалитраЌомер(ByVal n As Long)
     If n < 1 Or n > „ислоѕалитр() Then Exit Sub
     If TypeName(ActiveSheet) <> "Worksheet" Then Exit Sub
     If Not ѕерекраситьЋист(ActiveSheet, n) Then
@@ -1170,7 +1157,7 @@ End Function
 '  Ќе обращаетс€ к Excel Ч работает только с массивами in*, поэтому
 '  одинаково ведЄт себ€ на любом макете и провер€етс€ автотестами.
 '==========================================================================
-Public Sub ядро—троки()
+Private Sub ядро—троки()
 
     Dim i As Long, k As Long, q As Long, lv As Long, глуб As Long
     Dim посл As Long, s As String, база As String, преж√луб As Long
@@ -1227,23 +1214,35 @@ Public Sub ядро—троки()
                 If lv > 0 Then
                     s = inTxt(i, k)
                     If k = посл And mType(i) = LT_SUBTOTAL Then
-                        ' Ђ—евер »тогї Ч итог группы Ђ—еверї, котора€ только
-                        ' что закончилась (или начнЄтс€, если итоги вверху)
+                        ' —трока-итог бывает двух видов:
+                        '  * итоги внизу: Ђ—евер »тогї после детей Ч группа
+                        '    Ђ—еверї уже в стеке, им€ берЄм из подписи без Ђ»тогї;
+                        '  * итоги вверху: строка родител€ Ђ—еверї сама €вл€етс€
+                        '    итогом (Excel так еЄ и помечает) Ч подпись и есть им€
+                        '    Ќќ¬ќ… группы, старое им€ из стека брать нельз€.
+                        ' ѕользовательские итоги (Ђ—евер —уммаї) относ€тс€
+                        ' к группе в стеке.
                         база = —уффикс»тога(s)
-                        If Len(база) > 0 Then
-                            If StrComp(база, стек(lv), vbTextCompare) <> 0 Then
-                                стек(lv) = база: стекR(lv) = 0: стекC(lv) = 0
-                            End If
-                        ElseIf Len(стек(lv)) = 0 Then
+                        If inCT(i, k) = CT_CUSTOMSUB Then
+                            mOwnCustom(i) = True
+                            If Len(стек(lv)) = 0 Then стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        ElseIf Len(база) > 0 And StrComp(база, стек(lv), vbTextCompare) = 0 Then
+                            ' итог внизу: группа та же, что в стеке
+                        Else
                             стек(lv) = s: стекR(lv) = i: стекC(lv) = k
                         End If
-                        If inCT(i, k) = CT_CUSTOMSUB Then mOwnCustom(i) = True
-                    Else
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
+                    ElseIf StrComp(s, стек(lv), vbTextCompare) <> 0 Or k = посл Then
+                        ' Ќова€ подпись уровн€ Ч нижние уровни начинаютс€ заново.
+                        ' ѕовтор той же подписи предка (табличный макет с
+                        ' Ђповтор€ть подписиї) группу не мен€ет и детей не сбрасывает.
                         стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
                     End If
-                    For q = lv + 1 To mMaxD
-                        стек(q) = "": стекR(q) = 0: стекC(q) = 0
-                    Next q
                     If lv > глуб Then глуб = lv
                 End If
             Next k
@@ -1309,19 +1308,19 @@ Private Function “ип—троки(ByVal i As Long) As Long
     “ип—троки = t
 End Function
 
-Public Function Ётоќбщий»тог(ByVal s As String) As Boolean
+Private Function Ётоќбщий»тог(ByVal s As String) As Boolean
     s = LCase$(Trim$(s))
     Ётоќбщий»тог = (s = "общий итог" Or s = "grand total" Or s = LCase$(TXT_GRAND) _
                     Or s = LCase$(Trim$(mGrandTxt)))
 End Function
 
 ' ѕодпись общего итога: переименованна€ в сводной, иначе стандартна€
-Public Function “екстќбщего»тога() As String
+Private Function “екстќбщего»тога() As String
     If Len(Trim$(mGrandTxt)) > 0 Then “екстќбщего»тога = mGrandTxt Else “екстќбщего»тога = TXT_GRAND
 End Function
 
 ' Ђ—евер »тогї -> Ђ—еверї; не итог -> ""
-Public Function —уффикс»тога(ByVal s As String) As String
+Private Function —уффикс»тога(ByVal s As String) As String
     Dim t As String, x As Variant
     t = Trim$(s)
     For Each x In Array(" итог", " total", " всего", " итого")
@@ -1420,7 +1419,7 @@ End Sub
 ' ячейка, о которой сводна€ не сказала поле (бывает у итогов и на модели
 ' данных), получает уровень по месту на листе Ч если на этом месте
 ' (столбец + отступ) у остальных €чеек встречаетс€ ровно одно поле.
-Public Sub ƒозаполнить”ровни()
+Private Sub ƒозаполнить”ровни()
     Dim i As Long, k As Long, a As Long, n As Long, м As Long
     Dim место() As Long, ур() As Long, дво€ко() As Boolean
     ReDim место(1 To nR * nLbl + 1)
@@ -1528,7 +1527,7 @@ End Sub
 '  над своими детьми, общий итог Ч первой строкой. —ортировка устойчива€:
 '  внутри группы строки не перемешиваютс€.
 '==========================================================================
-Public Sub ѕор€док—трок()
+Private Sub ѕор€док—трок()
 
     Dim i As Long, k As Long, n As Long, r As Long, m As Long, a As Long
     Dim idx() As Long, ключ() As String, s As String
@@ -1644,7 +1643,7 @@ End Sub
 
 ' ѕосле упор€дочивани€: кто кому родитель, какие подписи показывать,
 ' уровень группировки строк.
-Public Sub ядроѕослеѕор€дка()
+Private Sub ядроѕослеѕор€дка()
 
     Dim p As Long, i As Long, k As Long, d As Long, q As Long, c As Long
     Dim свой() As String, пред As Long, приставка As Long, лв As Long
@@ -1772,7 +1771,7 @@ End Function
 '  яƒ–ќ: Ўјѕ ј —“ќЋЅ÷ќ¬
 '  ¬ход: cItem/cCnt/cType/cDF/cMeasLev/mMeas. ¬ыход: dLev/dDepth/nLev.
 '==========================================================================
-Public Sub —обратьЎапку()
+Private Sub —обратьЎапку()
 
     Dim j As Long, k As Long, maxLev As Long
     Dim мера() As String, выносить As Boolean
@@ -1919,7 +1918,7 @@ End Sub
 ' итог оказываетс€ в отдельной группе и уезжает вправо. ¬осстанавливаем путь
 ' по ЅЋ»∆ј…Ў≈… обычной линии с этим элементом: итог стоит вплотную к своей
 ' группе, а одноимЄнные элементы других родителей Ч дальше.
-Public Sub ¬осстановитьѕуть»тогов(ByRef item() As String, ByRef cnt() As Long, _
+Private Sub ¬осстановитьѕуть»тогов(ByRef item() As String, ByRef cnt() As Long, _
                                   ByRef тип() As Long, ByVal n As Long, ByVal maxLev As Long)
     Dim j As Long, q As Long, k As Long, шаг As Long
     Dim посл As String, строка As Long, уровень As Long
@@ -1991,7 +1990,7 @@ End Function
 '==========================================================================
 '  яƒ–ќ: ѕќ–яƒќ  —“ќЋЅ÷ќ¬ Ч итог группы левее еЄ столбцов
 '==========================================================================
-Public Sub ѕор€док—толбцов()
+Private Sub ѕор€док—толбцов()
     Dim j As Long, ост() As Long, n As Long
     ReDim cOrd(1 To nC)
     nCOrd = 0
