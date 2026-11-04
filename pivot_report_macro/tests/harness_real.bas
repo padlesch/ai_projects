@@ -78,3 +78,20 @@ Public Function ИзФайла(ByVal s As String) As String
 Ош:
     ИзФайла = "ОШИБКА " & Err.Number & ": " & Err.Description & " (" & Erl & ")"
 End Function
+
+Public Function ПланТекстомР() As String
+    Dim i As Long, k As Long, ci As Long, s As String
+    ПланШапки
+    s = nLev & Chr(30) & nCOrd & Chr(10)
+    For k = 1 To nLev
+        For ci = 1 To nCOrd
+            If ci > 1 Then s = s & Chr(30)
+            s = s & dLev(cOrd(ci), k)
+        Next ci
+        s = s & Chr(10)
+    Next k
+    For i = 1 To nОбъед
+        s = s & mОбК1(i) & Chr(30) & mОбС1(i) & Chr(30) & mОбК2(i) & Chr(30) & mОбС2(i) & Chr(10)
+    Next i
+    ПланТекстомР = s
+End Function

@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import openpyxl
 import run_out
+import excel_merge
 from runbasic import Basic
 
 RS, US, GS = chr(30), chr(31), chr(29)
@@ -119,6 +120,13 @@ if __name__ == '__main__':
             outs.append(out)
             print('=' * 60, 'сводная сообщает типы ячеек' if wt else 'сводная НЕ сообщает ничего')
             show_rep(out)
+            lost, g = excel_merge.lost_labels(b.call('ПланТекстомР'))
+            print('  шапка, как её покажет Excel после объединения ячеек:')
+            for row in g:
+                print('    ' + '|'.join(f'{c[:13]:13}' for c in row))
+            print('  подписи, стёртые объединением:', lost if lost else 'нет')
+            if lost:
+                outs.append('потеря')
         print('режимы совпали' if outs[0] == outs[1] else 'РЕЖИМЫ РАЗЛИЧАЮТСЯ')
     finally:
         b.close()

@@ -118,6 +118,8 @@ Private hTxt() As String          ' (строка шапки, столбец) — текст на листе
 Private hCT() As Long             ' (строка шапки, столбец) — тип ячейки сводной
 Private inCLT() As Long           ' тип столбца из оси сводной, -1 — неизвестен
 Private mСлужебные As String      ' |подписи полей|«Значения»| — не уровни шапки
+Private nОбъед As Long            ' план объединения шапки
+Private mОбК1() As Long, mОбС1() As Long, mОбК2() As Long, mОбС2() As Long
 '#ДЕКЛ-КОНЕЦ
 
 Private mLblCap() As String       ' подписи столбцов с уровнями строк
@@ -2087,6 +2089,69 @@ Private Function ТолькоИтог(ByRef idx() As Long, ByVal n As Long, _
     Next i
     ТолькоИтог = есть
 End Function
+
+' План объединения шапки: прямоугольники (уровень1, столбец1)-(уровень2, столбец2)
+' в координатах шапки. По горизонтали — соседние столбцы с одинаковыми
+' подписями на всех уровнях до k. По вертикали — столбец, у которого нижние
+' уровни пустые (итоги, пустой элемент), но только если его подпись не
+' объединена по горизонтали с соседями: иначе объединения пересекутся,
+' Excel сольёт их в один блок и сотрёт подписи нижнего уровня.
+Private Sub ПланШапки()
+
+    Dim k As Long, ci As Long, a As Long, п As Long, кк As Long
+    Dim шир() As Long          ' (уровень, позиция) — ширина горизонтального объединения
+
+    nОбъед = 0
+    ReDim mОбК1(1 To 2 * nLev * nCOrd + 1)
+    ReDim mОбС1(1 To 2 * nLev * nCOrd + 1)
+    ReDim mОбК2(1 To 2 * nLev * nCOrd + 1)
+    ReDim mОбС2(1 To 2 * nLev * nCOrd + 1)
+    ReDim шир(1 To nLev, 1 To nCOrd)
+
+    For k = 1 To nLev
+        ci = 1
+        Do While ci <= nCOrd
+            a = ci
+            Do While ci + 1 <= nCOrd
+                If Not ОдинаковыДо(cOrd(a), cOrd(ci + 1), k) Then Exit Do
+                If Len(Trim$(dLev(cOrd(a), k))) = 0 Then Exit Do
+                ci = ci + 1
+            Loop
+            For п = a To ci
+                шир(k, п) = ci - a + 1
+            Next п
+            If ci > a Then
+                nОбъед = nОбъед + 1
+                mОбК1(nОбъед) = k: mОбС1(nОбъед) = a
+                mОбК2(nОбъед) = k: mОбС2(nОбъед) = ci
+            End If
+            ci = ci + 1
+        Loop
+    Next k
+
+    For ci = 1 To nCOrd
+        кк = 0
+        For п = nLev To 1 Step -1
+            If Len(Trim$(dLev(cOrd(ci), п))) > 0 Then кк = п: Exit For
+        Next п
+        If кк >= 1 And кк < nLev Then
+            If шир(кк, ci) = 1 Then
+                nОбъед = nОбъед + 1
+                mОбК1(nОбъед) = кк: mОбС1(nОбъед) = ci
+                mОбК2(nОбъед) = nLev: mОбС2(nОбъед) = ci
+            End If
+        End If
+    Next ci
+
+End Sub
+
+Private Function ОдинаковыДо(ByVal a As Long, ByVal b As Long, ByVal k As Long) As Boolean
+    Dim i As Long
+    For i = 1 To k
+        If StrComp(dLev(a, i), dLev(b, i), vbTextCompare) <> 0 Then Exit Function
+    Next i
+    ОдинаковыДо = True
+End Function
 '#ЯДРО-КОНЕЦ
 
 
@@ -2689,57 +2754,27 @@ Private Sub ПометитьКуски(ws As Worksheet, ByVal r0 As Long, ByVal c0 As Long, _
     Next i
 End Sub
 
-' Объединение одинаковых заголовков по горизонтали и «висящих» — по вертикали
+' Объединение заголовков по плану ядра (ПланШапки): одинаковые подписи —
+' по горизонтали, «висящие» — по вертикали. План заранее исключает
+' пересечения: Excel сливает пересекающиеся объединения в один блок
+' и стирает подписи внутри него.
 Private Sub ОбъединитьШапку(ws As Worksheet, ByVal rHdr As Long, ByVal cData As Long)
 
-    Dim k As Long, ci As Long, a As Long, п As Long
+    Dim i As Long
     Dim былиПредупреждения As Boolean
     былиПредупреждения = Application.DisplayAlerts
     Application.DisplayAlerts = False
 
-    ' по горизонтали — соседние столбцы с одинаковым текстом на всех уровнях до k
-    For k = 1 To nLev
-        ci = 1
-        Do While ci <= nCOrd
-            a = ci
-            Do While ci + 1 <= nCOrd
-                If Not ОдинаковыДо(cOrd(a), cOrd(ci + 1), k) Then Exit Do
-                If Len(Trim$(dLev(cOrd(a), k))) = 0 Then Exit Do
-                ci = ci + 1
-            Loop
-            If ci > a Then
-                ws.Range(ws.Cells(rHdr + k - 1, cData + a - 1), _
-                         ws.Cells(rHdr + k - 1, cData + ci - 1)).Merge
-            End If
-            ci = ci + 1
-        Loop
-    Next k
-
-    ' по вертикали — у столбцов, чьи нижние уровни пустые (итоги):
-    ' подпись растягиваем от последнего непустого уровня до низа шапки
-    For ci = 1 To nCOrd
-        k = 1
-        For п = nLev To 1 Step -1
-            If Len(Trim$(dLev(cOrd(ci), п))) > 0 Then k = п: Exit For
-        Next п
-        If k < nLev Then
-            On Error Resume Next
-            ws.Range(ws.Cells(rHdr + k - 1, cData + ci - 1), _
-                     ws.Cells(rHdr + nLev - 1, cData + ci - 1)).Merge
-            On Error GoTo 0
-        End If
-    Next ci
+    ПланШапки
+    For i = 1 To nОбъед
+        On Error Resume Next
+        ws.Range(ws.Cells(rHdr + mОбК1(i) - 1, cData + mОбС1(i) - 1), _
+                 ws.Cells(rHdr + mОбК2(i) - 1, cData + mОбС2(i) - 1)).Merge
+        On Error GoTo 0
+    Next i
 
     Application.DisplayAlerts = былиПредупреждения
 End Sub
-
-Private Function ОдинаковыДо(ByVal a As Long, ByVal b As Long, ByVal k As Long) As Boolean
-    Dim i As Long
-    For i = 1 To k
-        If StrComp(dLev(a, i), dLev(b, i), vbTextCompare) <> 0 Then Exit Function
-    Next i
-    ОдинаковыДо = True
-End Function
 
 Private Sub Границы(rng As Range)
     Dim i As Variant

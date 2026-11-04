@@ -7,6 +7,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, '..', 'src', 'modОтчетИзСводнойV3.bas')
 sys.path.insert(0, HERE)
 from runbasic import Basic
+import excel_merge
 
 RS, US, GS = chr(30), chr(31), chr(29)
 PERM = {i: 11 - i for i in range(1, 11)}   # обратный порядок полей
@@ -346,8 +347,17 @@ def run_cols_sheet(b):
     for name, (rows, clt, meas, order, labels) in (('годы', A), ('меры внизу', C), ('меры сверху, пустой элемент', R)):
         for typed in (True, False):
             tests.append((f'{name}, типы {"известны" if typed else "неизвестны"}', sheet_case(rows, clt, meas, typed), order, labels))
-    out = b.call('ТестШапкиЛист', GS.join(t[1] for t in tests)).split(GS)
+    out = []
+    lost_all = []
+    for t in tests:
+        out.append(b.call('ТестШапкиЛист', t[1]).split(GS)[0])
+        lost, _ = excel_merge.lost_labels(b.call('ПланТекстом'))
+        lost_all.append(lost)
     fails = 0
+    for (name, *_), lost in zip(tests, lost_all):
+        if lost:
+            fails += 1
+            print(f'FAIL шапка «{name}»: Excel сотрёт подписи при объединении: {lost}')
     for (name, _, order, labels), o in zip(tests, out):
         got = [l.split(RS) for l in o.split('\n') if l]
         got_order = [int(x[0]) for x in got]
