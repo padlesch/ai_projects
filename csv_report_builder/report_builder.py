@@ -200,8 +200,11 @@ CHAR_W, HEAD_CHAR_W = 1.3, 1.65   # ширина символа (данные / 
 
 # ---------------------------------------------------------------- распознавание по имени колонки
 RX = {
-    "level": re.compile(r"^(уровень|level|lvl)$", re.I),
-    "name": re.compile(r"^(наименование|название|name)$", re.I),
+    # уровень иерархии: «Уровень», «Ур», «Ур.», «Level», «Lvl», «Lev», «Depth», «Глубина», «Уровень иерархии»,
+    # level_1 / lvl_x … (любую колонку можно отметить уровнем вручную: columns: {X: {role: level}})
+    "level": re.compile(r"^(уровень( иерархии)?|ур\.?|level|lvl|lev|depth|глубина|hier(archy)?[_ ]?level|"
+                        r"(level|lvl)[_ ]\w+)$", re.I),
+    "name": re.compile(r"^(наименование|название|name|наим\.?)$", re.I),
     "subrow": re.compile(r"^из них$", re.I),
     "id": re.compile(r"(^|[_\s])(id|code|cod|код|кода|инн|inn|огрн|ogrn|кпп|kpp|снилс|snils|окпо|okpo|окато|okato|"
                      r"октмо|oktmo|gid|pat_id|полис|polis|enp|номер|num|nom)"
@@ -563,6 +566,8 @@ def analyze_column(name, series, rule):
             col.values = [None if pd.isna(v) else int(v) for v in nums]
         else:
             if role == "level":           # «Уровень» не из целых чисел — обычный разрез
+                if rule.get("role") == "level":
+                    col.notes.append(f"«{name}» отмечена уровнем, но значения не целые числа — оставлена разрезом")
                 col.role = role = "dimension"
             col.kind = kind or "text"
             # коды из цифр без ведущих нулей — числом (Excel не ругается на «число как текст»); kind: text — как есть
@@ -724,6 +729,7 @@ def prepare(path, file_name, fc, period):
         for c in keys:
             c.role = "service" if c.role == "dimension" else c.role
         level.role = "service"
+        level.was_level = True          # для приложения: показать как «уровень», а не «служебная»
         metrics = [c for c in cols if c.is_metric]
         service = [level] + [c for c in cols if c.role in ("service", "subrow") and c is not level]
         rep.columns = [name] + metrics + service
@@ -1772,8 +1778,12 @@ KIND_CHOICES = [
     ("delta", "Δ — изменение (разница), подсвечивается"),
     ("delta_pct", "Δ% — изменение в процентах, подсвечивается"),
     ("dimension", "разрез / код / текст — не метрика"),
+    ("level", "уровень иерархии (0 — Всего, 1, 2 …)"),
+    ("name", "наименование строки (в иерархии)"),
+    ("subrow", "«из них» — подстрока под своей строкой"),
     ("skip", "не выводить в отчёт"),
 ]
+ROLE_KINDS = ("dimension", "skip", "level", "name", "subrow")   # не метрики — пишутся как role
 KIND_RU = {"count": "штуки", "money": "деньги", "number": "другое число", "pct": "процент", "pct_points": "процент",
            "delta": "Δ", "delta_pct": "Δ%", "date": "дата", "datetime": "дата и время", "text": "текст"}
 ROLE_RU = {"level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "service": "служебная",
@@ -2052,7 +2062,7 @@ def set_kind(columns, cols, kind):
         rule = columns.setdefault(x.name, {})
         for key in ("kind", "role"):
             rule.pop(key, None)
-        if kind in ("dimension", "skip"):
+        if kind in ROLE_KINDS:
             rule["role"] = kind
         else:
             rule.update({"role": "metric", "kind": kind})

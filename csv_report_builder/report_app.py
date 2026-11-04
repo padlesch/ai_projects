@@ -1,16 +1,19 @@
 """
-Веб-приложение: Excel-отчёты из папки CSV. Локально, без интернета: сервер слушает только 127.0.0.1,
-CSV никуда не отправляются. Движок — report_builder.py (тот же, что в консоли).
+Отчёт-мейкер: Excel-книга из папки CSV любой структуры. Локально, без интернета: сервер слушает только
+127.0.0.1, CSV никуда не отправляются. Движок — report_builder.py (тот же, что в консоли).
 
   python report_app.py                  -> откроет браузер на http://127.0.0.1:8765
   python report_app.py --port 9000 --no-browser
 
-Шаги на странице: папка -> 5 настроек книги -> типы отчётов (однотипные файлы — одна карточка; всё уже
-распознано, правится только то, что не нравится) -> «Собрать Excel». Настройки сохраняются в report.yaml
-в папке с CSV (прежний — report.yaml.bak), консольный запуск их тоже подхватывает.
+Вкладки: «Книга» (5 настроек) · «Колонки» (все колонки папки одной таблицей: вид, подпись, подсветка —
+по одной или группой: фильтр / поиск / галочки -> «Применить к выбранным») · «Файлы» (имя листа, описание,
+подзаголовок, «Итого», главная метрика, пропустить — тоже группой). Предпросмотр листа — справа.
+Всё, что не трогали, решает автоматика; изменённое помечено и сбрасывается к автоматике.
+Настройки сохраняются в report.yaml в папке с CSV (прежний — report.yaml.bak); консоль читает тот же файл.
 """
 import argparse
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -20,30 +23,41 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from openpyxl import Workbook
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import report_builder as R  # noqa: E402
 
-UI_KINDS = [k for k, _ in R.KIND_CHOICES]
 KIND_LABELS = {"count": "штуки", "money": "деньги", "number": "другое число", "pct": "процент / доля",
                "delta": "Δ изменение", "delta_pct": "Δ% изменение", "dimension": "разрез / текст",
-               "skip": "не выводить"}
-FIXED_ROLES = {"level": "уровень иерархии", "name": "наименование", "subrow": "«из них»"}
+               "level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "skip": "не выводить"}
 STATE = {"last_out": None, "last_folder": None}
+PREVIEW_ROWS, PREVIEW_COLS = 40, 30
 
 
-# ---------------------------------------------------------------- анализ и сборка (без HTTP — тестируются)
+# ---------------------------------------------------------------- модель страницы
 def config_path_for(folder):
     return next((os.path.join(folder, n) for n in R.CONFIG_NAMES if os.path.exists(os.path.join(folder, n))), None)
 
 
 def ui_kind(c):
+    if getattr(c, "was_level", False):
+        return "level"
+    if c.role in ("level", "name", "subrow"):
+        return c.role
     if c.is_metric:
         return "pct" if c.kind == "pct_points" else c.kind
     return "dimension"
 
 
+def group_of(file_name):
+    """Группа файла для быстрого выбора: номер отчёта до точки («19» для 19.3) или «без номера»."""
+    no, _ = R.report_number(os.path.splitext(file_name)[0])
+    return no.split(".")[0] if no else "без номера"
+
+
 def analyze(folder):
-    """Папка -> всё, что нужно странице: настройки книги и типы отчётов с распознанными колонками."""
+    """Папка -> книга, все колонки папки (по имени, с числом файлов) и все файлы."""
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         raise ValueError(f"Нет папки {folder}")
@@ -52,61 +66,88 @@ def analyze(folder):
     plan = R.plan_questions(folder, cfg, raw)
     if not plan["reports"] and not plan["broken"]:
         raise ValueError("В папке нет CSV-файлов")
+    rules = raw.get("columns") or {}
     files_raw = raw.get("files") or {}
     all_files = [f for f, _ in plan["reports"]]
+    struct_id = {}
+    columns, files = {}, []
     used = set()
-    types = []
-    for items in plan["structures"]:
-        f0, rep = items[0]
-        fc0 = R.file_config(cfg, f0)
-        hl = {id(c) for c in R.colored_columns(rep, fc0["coloring"])} \
-            if str(fc0["coloring"].get("mode", "static")).lower() != "off" else set()
+    for f, rep in plan["reports"]:
+        fc = R.file_config(cfg, f)
+        # подсветка — свойство колонки (правило colorize или «все Δ и Δ%»); старые списки по файлу не учитываются
+        hl = {id(c) for c in R.colored_columns(rep, dict(cfg["coloring"], columns=None))}
+        unsure, tech = R.doubts(rep, rules)
         main, _ = R.main_metric(rep.metrics, rep.table)
-        unsure, tech = R.doubts(rep, raw.get("columns") or {})
-        cols = []
         for c in rep.columns:
-            fixed = FIXED_ROLES.get(c.role) or ("служебная" if c.role == "service" and not c.formula else None)
-            cols.append({
-                "name": c.name, "label": c.label, "kind": ui_kind(c), "fixed": fixed if c.role in FIXED_ROLES else None,
-                "editable": not c.formula and c.role not in FIXED_ROLES,
-                "metric": c.is_metric, "formula": bool(c.formula), "sumable": c.is_metric and c.kind in
-                ("count", "money", "number"), "highlight": id(c) in hl, "main": c is main,
-                "sample": [str(v) for v in c.sample[:3]],
-                "flags": [x for x in R.column_flags(c) if x != "добавлена скриптом"] +
-                         (["техническое имя — подпишите"] if c in tech else []),
-                "doubt": c in unsure or c in tech,
-            })
-        files = []
-        for f, r in items:
-            entry = files_raw.get(f) or {}
-            sheet = R.sheet_title(entry.get("sheet") or R.file_config(cfg, f).get("sheet") or
-                                  R.default_sheet_name(f, all_files), used)
-            files.append({"file": f, "sheet": sheet, "description": entry.get("description", ""),
-                          "rows": r.n_rows, "notes": r.notes})
-        types.append({
-            "id": len(types), "hierarchy": rep.hierarchy, "columns": cols, "files": files,
-            "n_source": len(rep.source_columns), "doubt": any(c["doubt"] for c in cols),
+            item = columns.get(c.name)
+            if item is None:
+                rule = R.rules_for(rules, c.name)
+                item = columns[c.name] = {
+                    "name": c.name, "kind": ui_kind(c), "label": c.label,
+                    "highlight": id(c) in hl, "formula": bool(c.formula), "files": [],
+                    "sample": [str(v) for v in c.sample[:3]], "flags": [],
+                    "set_kind": "kind" in rule or "role" in rule, "set_label": "label" in rule,
+                    "set_hl": "colorize" in rule, "kinds_seen": {}}
+            item["files"].append(f)
+            k = ui_kind(c)
+            item["kinds_seen"][k] = item["kinds_seen"].get(k, 0) + 1
+            flags = [x for x in R.column_flags(c) if x != "добавлена скриптом"]
+            if c in tech:
+                flags.append("техническое имя — подпишите")
+            for x in flags:
+                if x not in item["flags"]:
+                    item["flags"].append(x)
+        key = (rep.hierarchy, tuple(c.name for c in rep.source_columns))
+        entry = files_raw.get(f) or {}
+        sheet_auto = R.default_sheet_name(f, all_files)
+        sheet = R.sheet_title(entry.get("sheet") or fc.get("sheet") or sheet_auto, used)
+        files.append({
+            "file": f, "sheet": sheet, "set_sheet": bool(entry.get("sheet")), "sheet_auto": sheet_auto,
+            "description": entry.get("description", ""), "subtitle": entry.get("subtitle", ""),
+            "rows": rep.n_rows, "cols": len(rep.source_columns), "hierarchy": rep.hierarchy,
+            "structure": struct_id.setdefault(key, len(struct_id) + 1), "group": group_of(f),
             "totals_applicable": not rep.hierarchy and any(c.additive for c in rep.metrics),
-            "totals": str(fc0["table"].get("totals", "auto")).lower() not in ("off", "false", "0"),
+            "totals": str(fc["table"].get("totals", "auto")).lower() not in ("off", "false", "0"),
+            "key": (rep.table.get("key") or "") if isinstance(rep.table.get("key"), str) else "",
+            "key_auto": main.name if main is not None else "",
+            "key_options": [c.name for c in rep.metrics if c.kind in ("count", "money", "number")],
+            "skip": False, "notes": rep.notes, "doubt": bool(unsure or tech),
         })
-    types.sort(key=lambda t: (not t["doubt"], -len(t["files"])))
+    for f, rule in files_raw.items():                 # файлы, пропущенные в конфиге, — тоже в списке
+        if (rule or {}).get("skip") and os.path.exists(os.path.join(folder, f)):
+            files.append({"file": f, "sheet": "", "set_sheet": False, "sheet_auto": "", "description": "",
+                          "subtitle": "", "rows": None, "cols": None, "hierarchy": False, "structure": 0,
+                          "group": group_of(f), "totals_applicable": False, "totals": True, "key": "",
+                          "key_auto": "", "key_options": [], "skip": True, "notes": [], "doubt": False})
+    cols = []
+    for item in columns.values():
+        seen = item.pop("kinds_seen")
+        if len(seen) > 1:      # в разных файлах распознано по-разному — показать и предложить выровнять
+            item["flags"].append("в разных файлах: " + ", ".join(f"{KIND_LABELS.get(k, k)} — {n}"
+                                                                    for k, n in seen.items()))
+        item["doubt"] = bool(item["flags"])
+        item["n_files"] = len(item["files"])
+        cols.append(item)
+    cols.sort(key=lambda c: (not c["doubt"], c["formula"], -c["n_files"], c["name"].lower()))
     book = raw.get("book") or {}
     return {
         "folder": folder, "config": cpath,
-        "out": (book.get("output") or folder.rstrip("\\/") + ".xlsx"),
+        "out": book.get("output") or folder.rstrip("\\/") + ".xlsx",
         "book": {"title": book.get("title") or os.path.basename(folder.rstrip("\\/")),
                  "subtitle": book.get("subtitle") or "", "period": book.get("period") or "",
                  "positive_is": (raw.get("coloring") or {}).get("positive_is", "bad"),
                  "palette": str((raw.get("style") or {}).get("palette", "B")).upper()},
         "has_years": any(c.year for _, r in plan["reports"] for c in r.metrics),
-        "types": types, "broken": [{"file": f, "reason": e} for f, e in plan["broken"]],
+        "columns": cols, "files": files, "kinds": KIND_LABELS,
+        "broken": [{"file": f, "reason": e} for f, e in plan["broken"]],
         "n_files": len(plan["reports"]) + len(plan["broken"]),
+        "n_structures": len(struct_id),
     }
 
 
-def settings_to_config(folder, payload, raw):
-    """Ответы страницы -> report.yaml. Вид и подпись колонки пишутся, только если их поменяли (иначе решает
-    автоматика); подсветка, главная метрика, «Итого», имя листа — явно для каждого файла: что на экране, то и в файле."""
+def settings_to_config(payload, raw):
+    """Состояние страницы -> report.yaml. У колонки флаги set_kind / set_label / set_hl: True — записать явно,
+    False — убрать из конфига (решает автоматика). Прочие ключи правил (формат, ширина…) не трогаются."""
     raw = json.loads(json.dumps(raw or {}))
     book = raw.setdefault("book", {})
     b = payload.get("book") or {}
@@ -114,48 +155,81 @@ def settings_to_config(folder, payload, raw):
         book[key] = str(b.get(key, "")).strip()
     raw.setdefault("coloring", {})["positive_is"] = "good" if b.get("positive_is") == "good" else "bad"
     raw.setdefault("style", {})["palette"] = "A" if str(b.get("palette")).upper() == "A" else "B"
-    columns = raw.setdefault("columns", {})
-    files = raw.setdefault("files", {})
-    for t in payload.get("types") or []:
-        cols = t.get("columns") or []
-        for c in cols:
-            if c.get("editable") and c.get("kind") != c.get("kind_orig") and c.get("kind") in UI_KINDS:
-                rule = columns.setdefault(c["name"], {})
-                for key in ("kind", "role"):
-                    rule.pop(key, None)
-                if c["kind"] in ("dimension", "skip"):
-                    rule["role"] = c["kind"]
-                else:
-                    rule.update({"role": "metric", "kind": c["kind"]})
-            label = str(c.get("label", "")).strip()
-            if label and label != c.get("label_orig"):
-                columns.setdefault(c["name"], {})["label"] = label
-        hl = [c["name"] for c in cols if c.get("highlight") and c.get("kind") != "skip"]
-        main = next((c["name"] for c in cols if c.get("main")), None)
-        for f in t.get("files") or []:
-            entry = files.setdefault(f["file"], {})
-            entry["sheet"] = str(f.get("sheet") or "").strip()[:31] or entry.get("sheet")
-            desc = str(f.get("description") or "").strip()
-            if desc:
-                entry["description"] = desc
+    rules = raw.setdefault("columns", {})
+    for c in payload.get("columns") or []:
+        if c.get("formula"):
+            if c.get("set_hl") is not None:
+                rule = rules.setdefault(c["name"], {})
+                rule.pop("colorize", None)
+                if c.get("set_hl"):
+                    rule["colorize"] = bool(c.get("highlight"))
+            continue
+        rule = rules.setdefault(c["name"], {})
+        for key in ("kind", "role"):
+            if not c.get("set_kind"):
+                rule.pop(key, None)
+        if c.get("set_kind") and c.get("kind") in KIND_LABELS:
+            rule.pop("kind", None)
+            rule.pop("role", None)
+            if c["kind"] in R.ROLE_KINDS:
+                rule["role"] = c["kind"]
             else:
-                entry.pop("description", None)
-            entry["coloring"] = {"columns": hl} if hl else {"mode": "off"}
-            table = entry.setdefault("table", {})
-            if main:
-                table["key"] = main
-            if t.get("totals_applicable"):
-                table["totals"] = "auto" if t.get("totals") else "off"
-            if not table:
-                entry.pop("table")
+                rule.update({"role": "metric", "kind": c["kind"]})
+        rule.pop("label", None)
+        label = str(c.get("label") or "").strip()
+        if c.get("set_label") and label:
+            rule["label"] = label
+        rule.pop("colorize", None)
+        if c.get("set_hl"):
+            rule["colorize"] = bool(c.get("highlight"))
+        if not rule:
+            rules.pop(c["name"])
+    files = raw.setdefault("files", {})
+    for f in payload.get("files") or []:
+        entry = files.setdefault(f["file"], {})
+        if f.get("skip"):
+            entry["skip"] = True
+            continue
+        entry.pop("skip", None)
+        sheet = str(f.get("sheet") or "").strip()[:31]
+        if f.get("set_sheet") and sheet:
+            entry["sheet"] = sheet
+        else:
+            entry.pop("sheet", None)
+        for key in ("description", "subtitle"):
+            v = str(f.get(key) or "").strip()
+            if v:
+                entry[key] = v
+            else:
+                entry.pop(key, None)
+        table = entry.setdefault("table", {})
+        if f.get("key"):
+            table["key"] = f["key"]
+        else:
+            table.pop("key", None)
+        if f.get("totals_applicable"):
+            if f.get("totals"):
+                table.pop("totals", None)
+            else:
+                table["totals"] = "off"
+        if not table:
+            entry.pop("table")
+        entry.pop("coloring", None)        # подсветка — правилом колонки; старые списки по файлу не мешают
+        if not entry:
+            files.pop(f["file"])
     return raw
+
+
+def config_from_payload(payload):
+    folder = os.path.abspath(payload["folder"])
+    cpath = config_path_for(folder)
+    raw = settings_to_config(payload, R.load_raw(cpath))
+    return folder, cpath, raw
 
 
 def run_build(payload):
     """Сохранить настройки и собрать книгу. -> {ok, out, log}."""
-    folder = os.path.abspath(payload["folder"])
-    cpath = config_path_for(folder)
-    raw = settings_to_config(folder, payload, R.load_raw(cpath))
+    folder, cpath, raw = config_from_payload(payload)
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         cpath = R.save_answers(raw, cpath or os.path.join(folder, "report.yaml"))
@@ -185,6 +259,87 @@ def run_build(payload):
     return {"ok": ok, "out": out, "log": log.getvalue()}
 
 
+# ---------------------------------------------------------------- предпросмотр листа
+def fmt_value(v, number_format):
+    if v is None:
+        return ""
+    if isinstance(v, (dt.datetime, dt.date)):
+        return v.strftime("%d.%m.%Y %H:%M" if isinstance(v, dt.datetime) and (v.hour or v.minute) else "%d.%m.%Y")
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return str(v)
+    f = number_format or "General"
+    if '"> 200%"' in f:
+        return "> 200%"
+    if "%" in f and '"%"' not in f:
+        s = f"{v * 100:.1f}%".replace(".", ",")
+        return ("+" + s) if (f.startswith("\\+") and v > 0) else s
+    if '"%"' in f:
+        return f"{v:.1f}%".replace(".", ",")
+    if v == 0 and ";\\-" in f:
+        return "-"
+    decimals = 2 if "0.00" in f else (0 if "#,##0" in f or f == "0" else (2 if isinstance(v, float) and not
+                                                                           float(v).is_integer() else 0))
+    return f"{v:,.{decimals}f}".replace(",", " ").replace(".", ",")
+
+
+def preview(payload):
+    """Лист выбранного файла с текущими (несохранёнными) настройками: первые строки, как в Excel."""
+    folder, cpath, raw = config_from_payload(payload)
+    f = payload.get("file")
+    if not f or not os.path.exists(os.path.join(folder, f)):
+        raise ValueError("Нет такого файла")
+    cfg = R.deep_merge(R.DEFAULTS, raw)
+    R.apply_palette(cfg["style"])
+    st = R.Styler(cfg["style"])
+    fc = R.file_config(cfg, f)
+    rep = R.prepare(os.path.join(folder, f), f, fc, cfg["book"].get("period") or "")
+    total_rows = rep.n_rows
+    if rep.n_rows > PREVIEW_ROWS:
+        rep.n_rows = PREVIEW_ROWS
+        for c in rep.columns:
+            c.values = c.values[:PREVIEW_ROWS]
+    no, rest = R.report_number(os.path.splitext(f)[0])
+    rep.title = fc.get("title") or cfg["book"].get("title") or os.path.basename(folder)
+    rep.description = fc.get("description") or (f"Отчёт {no}. {rest}" if no else rest)
+    wb = Workbook()
+    ws = wb.active
+    with contextlib.redirect_stdout(io.StringIO()):
+        R.write_sheet(ws, rep, fc, cfg, st)
+    ncols = min(ws.max_column, PREVIEW_COLS)
+    merged = {}
+    covered = set()
+    for rng in ws.merged_cells.ranges:
+        if rng.min_row >= 5:
+            merged[(rng.min_row, rng.min_col)] = (rng.max_row - rng.min_row + 1, rng.max_col - rng.min_col + 1)
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    if (r, c) != (rng.min_row, rng.min_col):
+                        covered.add((r, c))
+    rows = []
+    for r in range(5, ws.max_row + 1):
+        cells = []
+        for c in range(1, ncols + 1):
+            if (r, c) in covered:
+                continue
+            cell = ws.cell(r, c)
+            fill = cell.fill.fgColor.rgb if cell.fill and cell.fill.fill_type == "solid" else None
+            span = merged.get((r, c), (1, 1))
+            cells.append({"v": fmt_value(cell.value, cell.number_format),
+                          "bg": ("#" + fill[-6:]) if isinstance(fill, str) and fill[-6:] != "000000" else None,
+                          "b": bool(cell.font and cell.font.bold), "i": bool(cell.font and cell.font.italic),
+                          "fg": ("#" + cell.font.color.rgb[-6:]) if cell.font and cell.font.color is not None
+                          and isinstance(cell.font.color.rgb, str) else None,
+                          "ind": int(cell.alignment.indent or 0) if cell.alignment else 0,
+                          "al": (cell.alignment.horizontal if cell.alignment else None) or "left",
+                          "rs": span[0], "cs": min(span[1], ncols - c + 1)})
+        rows.append(cells)
+    return {"file": f, "sheet": fc.get("sheet") or R.default_sheet_name(f, [f]),
+            "title": rep.title, "description": rep.description, "rows": rows, "shown": rep.n_rows,
+            "total": total_rows, "cols": ws.max_column, "cols_shown": ncols, "hierarchy": rep.hierarchy,
+            "notes": rep.notes}
+
+
+# ---------------------------------------------------------------- система
 def pick_folder():
     """Системный диалог выбора папки (tkinter в отдельном процессе — не мешает серверу)."""
     code = ("import tkinter as t, tkinter.filedialog as d; r=t.Tk(); r.withdraw(); r.attributes('-topmost', 1); "
@@ -204,7 +359,6 @@ def open_path(path):
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
 
 
-# ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):          # без шума в консоли
         pass
@@ -235,12 +389,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "чужой источник запроса"}, 403)
         try:
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-            if self.path == "/api/analyze":
-                return self.send_json(analyze(payload.get("folder", "")))
-            if self.path == "/api/build":
-                return self.send_json(run_build(payload))
-            if self.path == "/api/pick":
-                return self.send_json({"folder": pick_folder()})
+            routes = {"/api/analyze": lambda: analyze(payload.get("folder", "")),
+                      "/api/build": lambda: run_build(payload),
+                      "/api/preview": lambda: preview(payload),
+                      "/api/pick": lambda: {"folder": pick_folder()}}
+            if self.path in routes:
+                return self.send_json(routes[self.path]())
             if self.path == "/api/open":
                 target = STATE["last_out"] if payload.get("what") == "book" else STATE["last_folder"]
                 if not target:
@@ -264,7 +418,7 @@ def serve(port=8765, browser=True):
     else:
         sys.exit(f"Порты {port}–{port + 19} заняты")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"Отчёты из CSV: {url}  (остановить — Ctrl+C или закрыть это окно)")
+    print(f"Отчёт-мейкер: {url}  (остановить — Ctrl+C или закрыть это окно)")
     if browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -279,280 +433,403 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Отчёты из CSV</title>
+<title>Отчёт-мейкер</title>
 <style>
 :root{--ink:#1F1F1F;--title:#1B3A5C;--sub:#2D6A73;--muted:#555F69;--line:#D3D9DF;--frame:#9AA5B1;--head:#E8ECF0;
---plate:#F5F7F9;--count:#DCE8F3;--money:#DCEAD3;--number:#D6ECEC;--delta:#FBF3E2;--warn:#7A5600;--warnbg:#FBEFD0;
---bad:#9E3423;--badbg:#F6DAD0;--ok:#2F6A30;--okbg:#E1EEDC}
+--plate:#F5F7F9;--count:#DCE8F3;--money:#DCEAD3;--number:#D6ECEC;--delta:#FBF3E2;--role:#C9DCEC;
+--warn:#7A5600;--warnbg:#FBEFD0;--bad:#9E3423;--badbg:#F6DAD0;--ok:#2F6A30;--okbg:#E1EEDC;--sel:#EAF1F8}
 *{box-sizing:border-box}
-body{margin:0;background:#fff;color:var(--ink);font:15px/1.45 "Segoe UI",Roboto,Arial,sans-serif}
-main{max-width:1200px;margin:0 auto;padding:24px 16px 120px}
-h1{margin:0 0 4px;font:700 28px/1.2 Arial,sans-serif;color:var(--title)}
-.lead{margin:0 0 24px;color:var(--muted)}
-h2{margin:0 0 12px;font:700 19px/1.3 Arial,sans-serif;color:var(--title)}
-section.card{border:1px solid var(--line);border-top:3px solid var(--title);background:#fff;padding:18px 20px;margin:0 0 18px}
-label{display:block;font-weight:600;font-size:13px;color:var(--muted);margin:0 0 4px}
-input[type=text]{width:100%;padding:8px 10px;border:1px solid var(--frame);font:inherit;color:var(--ink);background:#fff}
-input[type=text]:focus,select:focus,button:focus-visible{outline:2px solid var(--sub);outline-offset:1px}
-select{padding:6px 8px;border:1px solid var(--frame);font:inherit;background:#fff;max-width:100%}
-.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
-.row>.grow{flex:1 1 320px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
-button{font:600 15px/1 "Segoe UI",Arial,sans-serif;padding:10px 16px;min-height:40px;border:1px solid var(--title);
-background:#fff;color:var(--title);cursor:pointer}
+html,body{margin:0;background:#fff;color:var(--ink);font:14px/1.4 "Segoe UI",Roboto,Arial,sans-serif}
+button,input,select{font:inherit;color:inherit}
+header.top{border-bottom:1px solid var(--frame);background:#fff;position:sticky;top:0;z-index:5}
+.top .in{max-width:1500px;margin:0 auto;padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.brand{font:700 18px Arial,sans-serif;color:var(--title);margin-right:8px;white-space:nowrap}
+.top input[type=text]{flex:1 1 360px;min-width:0}
+input[type=text]{padding:6px 9px;border:1px solid var(--frame);background:#fff;width:100%}
+select{padding:5px 6px;border:1px solid var(--frame);background:#fff;max-width:100%}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--sub);outline-offset:1px}
+button{font-weight:600;padding:7px 13px;min-height:34px;border:1px solid var(--title);background:#fff;color:var(--title);cursor:pointer}
 button.primary{background:var(--title);color:#fff}
-button:disabled{opacity:.5;cursor:default}
-.seg{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--frame);width:max-content;max-width:100%}
-.seg label{margin:0;padding:8px 12px;font-weight:500;color:var(--ink);cursor:pointer;border-right:1px solid var(--line)}
-.seg label:last-child{border-right:0}
-.seg input{margin:0 6px 0 0}
-.summary{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
-.pill{padding:4px 10px;background:var(--plate);border:1px solid var(--line);font-size:13px}
+button.link{border:0;background:none;padding:2px 4px;min-height:0;color:var(--title);text-decoration:underline;font-weight:500}
+button:disabled{opacity:.45;cursor:default}
+.wrap{max-width:1500px;margin:0 auto;padding:12px 16px 110px}
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--frame);margin:0 0 12px;overflow-x:auto}
+.tabs button{border:0;border-bottom:3px solid transparent;background:none;color:var(--muted);padding:9px 16px;white-space:nowrap}
+.tabs button[aria-selected=true]{color:var(--title);border-bottom-color:var(--title)}
+.badge{display:inline-block;min-width:18px;padding:0 5px;margin-left:5px;background:var(--warnbg);color:var(--warn);font-size:12px;border-radius:9px;text-align:center}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.pill{padding:2px 9px;background:var(--plate);border:1px solid var(--line);font-size:12.5px}
 .pill.warn{background:var(--warnbg);color:var(--warn);border-color:#E8D49A}
 .pill.bad{background:var(--badbg);color:var(--bad);border-color:#E9B7A6}
-details.type{border:1px solid var(--line);margin:0 0 12px;background:#fff}
-details.type>summary{list-style:none;cursor:pointer;padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:var(--plate)}
-details.type>summary::-webkit-details-marker{display:none}
-details.type>summary::before{content:"▸";color:var(--title)}
-details.type[open]>summary::before{content:"▾"}
-.tname{font-weight:700;color:var(--title)}
-.tmeta{color:var(--muted);font-size:13px}
-.tbody{padding:12px 16px 16px}
-.tools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:0 0 10px;font-size:14px}
-.tools label{display:inline;font-weight:500;color:var(--ink);font-size:14px}
-.scroll{overflow-x:auto;border:1px solid var(--frame)}
-table{border-collapse:collapse;width:100%;font-size:14px}
-th{background:var(--head);color:var(--title);text-align:left;padding:7px 8px;border-bottom:1px solid var(--frame);white-space:nowrap}
-td{padding:5px 8px;border-top:1px solid var(--line);vertical-align:middle}
-td.num{color:#66707A;width:36px;text-align:right}
-td.kind{border-left:6px solid transparent}
-td.k-count{border-left-color:var(--count)}td.k-money{border-left-color:var(--money)}
-td.k-number,td.k-pct{border-left-color:var(--number)}td.k-delta,td.k-delta_pct{border-left-color:var(--delta)}
-td.k-dimension{border-left-color:var(--head)}td.k-skip{border-left-color:#fff}
-tr.doubt td{background:#FFFBF0}
-.flag{color:var(--warn);font-size:13px}
-.sample{color:var(--muted);font-size:13px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.label-in{min-width:140px}
-.files td input{min-width:160px}
-.note{font-size:12px;color:var(--bad)}
-.hint{font-size:13px;color:var(--muted);margin:8px 0 0}
-.bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--frame);padding:12px 16px}
-.bar .in{max-width:1200px;margin:0 auto;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-.status{color:var(--muted);font-size:14px;flex:1 1 200px}
-pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line);padding:12px;max-height:340px;overflow:auto;font:13px/1.4 Consolas,monospace;margin:12px 0 0}
-.err{background:var(--badbg);color:var(--bad);padding:10px 12px;margin:12px 0 0;border:1px solid #E9B7A6}
-.okmsg{background:var(--okbg);color:var(--ok);padding:10px 12px;margin:12px 0 0;border:1px solid #BFD9B5}
-.hidden{display:none}
-@media (max-width:640px){h1{font-size:23px}.sample{max-width:120px}}
+.layout{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
+.layout.with-preview{grid-template-columns:minmax(0,1fr) minmax(0,46%)}
+.panel{min-width:0}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 8px}
+.toolbar input[type=text]{width:220px}
+.toolbar label{display:flex;gap:5px;align-items:center;color:var(--muted)}
+.bulk{display:none;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;margin:0 0 8px;background:var(--sel);border:1px solid #BCD0E4}
+.bulk.on{display:flex}
+.bulk b{color:var(--title)}
+.bulk .sep{width:1px;align-self:stretch;background:#BCD0E4}
+.scroll{overflow:auto;border:1px solid var(--frame);max-height:calc(100vh - 290px)}
+table.grid{border-collapse:collapse;width:100%}
+.grid th{position:sticky;top:0;background:var(--head);color:var(--title);text-align:left;padding:6px 7px;border-bottom:1px solid var(--frame);white-space:nowrap;font-size:13px;z-index:1}
+.grid td{padding:3px 7px;border-top:1px solid var(--line);height:32px;vertical-align:middle}
+.grid tr.picked td{background:var(--sel)}
+.grid tr.doubt td.nm{box-shadow:inset 3px 0 0 #E2B23C}
+.grid td.cb,.grid th.cb{width:30px;text-align:center}
+.grid td.num{color:var(--muted);text-align:right;width:52px}
+.grid td.kind{border-left:6px solid transparent;min-width:150px}
+.k-count{border-left-color:var(--count)!important}.k-money{border-left-color:var(--money)!important}
+.k-number,.k-pct{border-left-color:var(--number)!important}.k-delta,.k-delta_pct{border-left-color:var(--delta)!important}
+.k-dimension,.k-skip{border-left-color:var(--head)!important}.k-level,.k-name,.k-subrow{border-left-color:var(--role)!important}
+.grid input[type=text]{padding:3px 6px;min-width:120px}
+.grid select{padding:2px 4px}
+.set{font-weight:700}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--sub);margin-left:4px;vertical-align:middle}
+.flag{color:var(--warn);font-size:12.5px}
+.sample{color:var(--muted);font-size:12.5px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.note{color:var(--bad);font-size:12.5px}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 18px;max-width:1100px}
+.form label.f{display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px}
+.seg{display:flex;flex-wrap:wrap;border:1px solid var(--frame);width:max-content;max-width:100%}
+.seg label{padding:6px 11px;cursor:pointer;border-right:1px solid var(--line);display:flex;gap:5px;align-items:center}
+.seg label:last-child{border-right:0}
+.prev{border:1px solid var(--frame);min-width:0;display:flex;flex-direction:column;max-height:calc(100vh - 200px)}
+.prev .ph{display:flex;gap:8px;align-items:center;padding:7px 10px;background:var(--head);border-bottom:1px solid var(--frame)}
+.prev .ph b{color:var(--title);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prev .pb{overflow:auto;padding:10px;flex:1}
+.xl-title{font:700 15px Arial,sans-serif;color:var(--title)}
+.xl-sub{font:600 13px Arial,sans-serif;color:var(--sub)}
+.xl-desc{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+table.xl{border-collapse:collapse;font:12.5px "Arial Narrow",Arial,sans-serif}
+.xl td{border:1px solid #D3D9DF;padding:2px 6px;white-space:nowrap;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.xl-more{color:var(--muted);font-size:12.5px;margin:6px 0 0}
+.bar{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--frame);z-index:6}
+.bar .in{max-width:1500px;margin:0 auto;padding:9px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bar .out{flex:1 1 340px;display:flex;gap:6px;align-items:center}
+.bar .out span{color:var(--muted);white-space:nowrap}
+.status{color:var(--muted);flex:1 1 220px}
+.msg{padding:8px 11px;margin:8px 0;border:1px solid}
+.msg.err{background:var(--badbg);color:var(--bad);border-color:#E9B7A6}
+.msg.ok{background:var(--okbg);color:var(--ok);border-color:#BFD9B5}
+pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line);padding:10px;max-height:300px;overflow:auto;font:12.5px/1.4 Consolas,monospace}
+.empty{color:var(--muted);padding:40px 0;text-align:center}
+.hidden{display:none!important}
+@media (max-width:1000px){.layout.with-preview{grid-template-columns:minmax(0,1fr)}.scroll{max-height:none}}
+@media (max-width:640px){.brand{width:100%}.toolbar input[type=text]{width:100%}}
 </style>
 </head>
 <body>
-<main>
-<h1>Отчёты из CSV</h1>
-<p class="lead">Папка с выгрузками → одна Excel-книга в едином оформлении. Всё распознаётся автоматически — поправьте только то, что не нравится.</p>
-
-<section class="card" aria-labelledby="s1">
-<h2 id="s1">1. Папка с CSV</h2>
-<div class="row">
-<div class="grow"><label for="folder">Путь к папке</label><input type="text" id="folder" placeholder="C:\Users\...\reps" autocomplete="off"></div>
+<header class="top"><div class="in">
+<span class="brand">Отчёт-мейкер</span>
+<input type="text" id="folder" placeholder="Папка с CSV, например C:\Users\...\reps" aria-label="Папка с CSV" autocomplete="off">
 <button type="button" id="pick">Выбрать…</button>
 <button type="button" class="primary" id="analyze">Анализировать</button>
+</div></header>
+
+<div class="wrap">
+<div id="err" class="msg err hidden" role="alert"></div>
+<div id="start" class="empty">Укажите папку с CSV-выгрузками и нажмите «Анализировать».<br>Файлы могут быть любой структуры: иерархия включается, если есть колонка уровня.</div>
+
+<div id="app" class="hidden">
+<div class="pills" id="summary"></div>
+<div class="tabs" role="tablist">
+<button type="button" role="tab" id="t-book" aria-selected="false" data-tab="book">Книга</button>
+<button type="button" role="tab" id="t-cols" aria-selected="true" data-tab="cols">Колонки<span class="badge hidden" id="b-cols"></span></button>
+<button type="button" role="tab" id="t-files" aria-selected="false" data-tab="files">Файлы<span class="badge hidden" id="b-files"></span></button>
 </div>
-<div id="err1" class="err hidden" role="alert"></div>
+
+<section id="p-book" class="hidden" role="tabpanel" aria-labelledby="t-book">
+<div class="form">
+<div><label class="f" for="title">Заголовок (вверху каждого листа)</label><input type="text" id="title"></div>
+<div><label class="f" for="subtitle">Подзаголовок — отбор / источник</label><input type="text" id="subtitle" placeholder="ЗЛ, ДЗМ, взрослые"></div>
+<div><label class="f" for="period">Период к годам в шапке</label><input type="text" id="period" placeholder="9м → «2026 9м»"></div>
+<div><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lgrow">Рост показателей — это</span>
+<div class="seg" role="radiogroup" aria-labelledby="lgrow"><label><input type="radio" name="grow" value="bad">плохо: рост красный</label><label><input type="radio" name="grow" value="good">хорошо: рост зелёный</label></div></div>
+<div><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lpal">Оформление</span>
+<div class="seg" role="radiogroup" aria-labelledby="lpal"><label><input type="radio" name="pal" value="B">палитра B (основная)</label><label><input type="radio" name="pal" value="A">A (старый формат)</label></div></div>
+</div>
 </section>
 
-<div id="after" class="hidden">
-<section class="card" aria-labelledby="s2">
-<h2 id="s2">2. Книга</h2>
-<div class="grid">
-<div><label for="title">Заголовок (вверху каждого листа)</label><input type="text" id="title"></div>
-<div><label for="subtitle">Подзаголовок — отбор / источник</label><input type="text" id="subtitle" placeholder="ЗЛ, ДЗМ, взрослые"></div>
-<div id="periodBox"><label for="period">Период к годам в шапке</label><input type="text" id="period" placeholder="9м → «2026 9м»"></div>
+<div class="layout" id="layout">
+<section id="p-cols" class="panel" role="tabpanel" aria-labelledby="t-cols">
+<div class="toolbar">
+<input type="text" id="c-q" placeholder="Поиск: Сумма, Δ, MO_…" aria-label="Поиск колонок">
+<select id="c-f" aria-label="Фильтр колонок">
+<option value="all">все колонки</option><option value="doubt">с пометками</option><option value="metric">метрики</option>
+<option value="dim">разрезы и роли</option><option value="set">изменённые вручную</option><option value="added">добавленные Δ / Δ%</option></select>
+<select id="c-file" aria-label="Колонки файла"><option value="">во всех файлах</option></select>
+<span class="status" id="c-count"></span>
 </div>
-<div class="grid" style="margin-top:14px">
-<div><label id="lgrow">Рост показателей — это</label>
-<div class="seg" role="radiogroup" aria-labelledby="lgrow">
-<label><input type="radio" name="grow" value="bad">плохо: рост красный</label>
-<label><input type="radio" name="grow" value="good">хорошо: рост зелёный</label></div></div>
-<div><label id="lpal">Оформление</label>
-<div class="seg" role="radiogroup" aria-labelledby="lpal">
-<label><input type="radio" name="pal" value="B">палитра B (основная)</label>
-<label><input type="radio" name="pal" value="A">A (старый формат)</label></div></div>
+<div class="bulk" id="c-bulk" role="region" aria-label="Действия с выбранными колонками">
+<b id="c-n"></b><span class="sep"></span>
+<label>Вид <select id="cb-kind"><option value="">— не менять —</option></select></label>
+<label>Подсветка <select id="cb-hl"><option value="">— не менять —</option><option value="1">вкл</option><option value="0">выкл</option></select></label>
+<label>Подпись <input type="text" id="cb-label" style="width:150px" placeholder="не менять"></label>
+<button type="button" class="primary" id="cb-apply">Применить</button>
+<button type="button" id="cb-reset" title="Убрать ручные настройки — решит автоматика">Сбросить к авто</button>
+<button type="button" class="link" id="cb-clear">снять выбор</button>
 </div>
+<div class="scroll"><table class="grid" id="c-table"><thead><tr>
+<th class="cb"><input type="checkbox" id="c-all" aria-label="Выбрать все видимые"></th><th>Колонка в CSV</th><th>Вид</th><th>Подпись в шапке</th>
+<th title="шкала «рост / снижение»">Подсв.</th><th>Файлов</th><th>Пример</th><th>Пометки</th></tr></thead><tbody></tbody></table></div>
 </section>
 
-<section class="card" aria-labelledby="s3">
-<h2 id="s3">3. Типы отчётов</h2>
-<div class="summary" id="summary"></div>
-<p class="hint" style="margin:0 0 12px">Однотипные файлы (одинаковый набор колонок) — одна карточка. Карточки с сомнениями открыты и стоят первыми. Цвет полоски у вида — цвет шапки колонки в Excel. Вид и подпись колонки применяются ко всем файлам, где есть колонка с таким именем.</p>
-<div id="types"></div>
+<section id="p-files" class="panel hidden" role="tabpanel" aria-labelledby="t-files">
+<div class="toolbar">
+<input type="text" id="f-q" placeholder="Поиск по файлу или листу" aria-label="Поиск файлов">
+<select id="f-g" aria-label="Группа файлов"><option value="">все группы</option></select>
+<select id="f-s" aria-label="Структура"><option value="">все структуры</option></select>
+<select id="f-f" aria-label="Фильтр файлов"><option value="all">все файлы</option><option value="doubt">с пометками</option><option value="notes">с замечаниями</option><option value="skip">пропущенные</option></select>
+<span class="status" id="f-count"></span>
+</div>
+<div class="bulk" id="f-bulk" role="region" aria-label="Действия с выбранными файлами">
+<b id="f-n"></b><span class="sep"></span>
+<label>Имя листа <select id="fb-sheet"><option value="">— не менять —</option><option value="auto">автоматически</option><option value="no">{номер}</option><option value="otch">Отчёт {номер}</option><option value="norest">{номер} {имя файла}</option><option value="rest">{имя файла}</option></select></label>
+<label>Подзаголовок <input type="text" id="fb-sub" style="width:170px" placeholder="не менять"></label>
+<label>«Итого» <select id="fb-tot"><option value="">— не менять —</option><option value="1">да</option><option value="0">нет</option></select></label>
+<label>Главная метрика <select id="fb-key"><option value="">— не менять —</option><option value="@auto">автоматически</option></select></label>
+<label>В книгу <select id="fb-skip"><option value="">— не менять —</option><option value="0">включить</option><option value="1">пропустить</option></select></label>
+<button type="button" class="primary" id="fb-apply">Применить</button>
+<button type="button" class="link" id="fb-clear">снять выбор</button>
+</div>
+<div class="scroll"><table class="grid" id="f-table"><thead><tr>
+<th class="cb"><input type="checkbox" id="f-all" aria-label="Выбрать все видимые"></th><th>Файл</th><th>Имя листа</th><th>Описание под заголовком</th>
+<th>Подзаголовок</th><th>Итого</th><th>Главная метрика</th><th>Строк×кол.</th><th>В книгу</th><th></th></tr></thead><tbody></tbody></table></div>
 <div id="broken"></div>
 </section>
+
+<aside class="prev hidden" id="prev" aria-label="Предпросмотр листа">
+<div class="ph"><b id="pv-name">Предпросмотр</b><button type="button" id="pv-refresh">Обновить</button><button type="button" id="pv-close" aria-label="Закрыть предпросмотр">✕</button></div>
+<div class="pb" id="pv-body"></div>
+</aside>
 </div>
 
 <div id="result"></div>
-</main>
+</div>
+</div>
 
 <div class="bar"><div class="in">
-<div class="grow" style="flex:1 1 320px"><label for="out">Сохранить книгу как</label><input type="text" id="out" disabled></div>
+<div class="out"><span>Книга:</span><input type="text" id="out" disabled aria-label="Куда сохранить книгу"></div>
 <button type="button" class="primary" id="build" disabled>Собрать Excel</button>
-<span class="status" id="status" aria-live="polite">Укажите папку и нажмите «Анализировать».</span>
+<span class="status" id="status" aria-live="polite"></span>
 </div></div>
 
 <script>
-const $ = s => document.querySelector(s);
-const KINDS = %KINDS%;
-let data = null;
-
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+let D = null, tab = "cols", pvFile = null;
+const pickC = new Set(), pickF = new Set();
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const status = t => $("#status").textContent = t || "";
 async function api(path, body) {
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
-  const j = await r.json();
-  if (!r.ok) throw new Error(j.error || ("Ошибка " + r.status));
-  return j;
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || ("Ошибка " + r.status)); return j;
 }
-function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); }
-function setStatus(t) { $("#status").textContent = t; }
+function showErr(m) { $("#err").textContent = m; $("#err").classList.toggle("hidden", !m); }
 
-$("#pick").onclick = async () => {
-  setStatus("Открываю окно выбора папки…");
-  try { const j = await api("/api/pick"); if (j.folder) { $("#folder").value = j.folder; analyze(); } else setStatus("Папка не выбрана."); }
-  catch (e) { setStatus("Не удалось открыть окно — вставьте путь вручную."); }
-};
+// ---------- папка
+$("#pick").onclick = async () => { status("Открываю окно выбора папки…");
+  try { const j = await api("/api/pick"); if (j.folder) { $("#folder").value = j.folder; analyze(); } else status("Папка не выбрана."); }
+  catch (e) { status("Не удалось открыть окно — вставьте путь вручную."); } };
 $("#analyze").onclick = () => analyze();
 $("#folder").addEventListener("keydown", e => { if (e.key === "Enter") analyze(); });
-
 async function analyze() {
-  const folder = $("#folder").value.trim().replace(/^"|"$/g, "");
-  $("#err1").classList.add("hidden"); $("#result").innerHTML = "";
-  if (!folder) { $("#err1").textContent = "Укажите путь к папке с CSV."; $("#err1").classList.remove("hidden"); return; }
-  setStatus("Читаю файлы…"); $("#analyze").disabled = true;
-  try {
-    data = await api("/api/analyze", {folder});
-    render();
-    setStatus("Проверьте карточки с сомнениями и нажмите «Собрать Excel».");
-  } catch (e) {
-    $("#err1").textContent = e.message; $("#err1").classList.remove("hidden"); setStatus("");
-  } finally { $("#analyze").disabled = false; }
+  const folder = $("#folder").value.trim().replace(/^"|"$/g, ""); showErr(""); $("#result").innerHTML = "";
+  if (!folder) return showErr("Укажите путь к папке с CSV.");
+  status("Читаю файлы…"); $("#analyze").disabled = true;
+  try { D = await api("/api/analyze", {folder}); pickC.clear(); pickF.clear(); init(); status("Поправьте, что нужно, и нажмите «Собрать Excel». Всё остальное решит автоматика."); }
+  catch (e) { showErr(e.message); status(""); } finally { $("#analyze").disabled = false; }
 }
 
-function render() {
-  $("#after").classList.remove("hidden");
-  $("#title").value = data.book.title; $("#subtitle").value = data.book.subtitle; $("#period").value = data.book.period;
-  $("#periodBox").classList.toggle("hidden", !data.has_years && !data.book.period);
-  document.querySelector(`input[name=grow][value=${data.book.positive_is}]`).checked = true;
-  document.querySelector(`input[name=pal][value=${data.book.palette}]`).checked = true;
-  $("#out").value = data.out; $("#out").disabled = false; $("#build").disabled = false;
-  const nd = data.types.filter(t => t.doubt).length;
-  const nf = data.types.reduce((a, t) => a + t.files.length, 0);
-  $("#summary").innerHTML = `<span class="pill">CSV: ${data.n_files}</span><span class="pill">прочитано: ${nf}</span>` +
-    `<span class="pill">типов отчётов: ${data.types.length}</span>` +
-    (nd ? `<span class="pill warn">с сомнениями: ${nd}</span>` : `<span class="pill">сомнений нет</span>`) +
-    (data.broken.length ? `<span class="pill bad">не прочитано: ${data.broken.length}</span>` : "");
-  data.types.forEach(t => t.columns.forEach(c => { c.kind_orig = c.kind; c.label_orig = c.label; }));
-  $("#types").innerHTML = data.types.map(typeCard).join("");
-  $("#broken").innerHTML = data.broken.length ? `<details class="type"><summary><span class="tname">Не прочитаны (${data.broken.length})</span></summary>
-    <div class="tbody"><div class="scroll"><table><thead><tr><th>Файл</th><th>Причина</th></tr></thead><tbody>` +
-    data.broken.map(b => `<tr><td>${esc(b.file)}</td><td>${esc(b.reason)}</td></tr>`).join("") + `</tbody></table></div></div></details>` : "";
-  bind();
+function init() {
+  $("#start").classList.add("hidden"); $("#app").classList.remove("hidden");
+  const b = D.book; $("#title").value = b.title; $("#subtitle").value = b.subtitle; $("#period").value = b.period;
+  document.querySelector(`input[name=grow][value=${b.positive_is}]`).checked = true;
+  document.querySelector(`input[name=pal][value=${b.palette}]`).checked = true;
+  $("#out").value = D.out; $("#out").disabled = false; $("#build").disabled = false;
+  D.columns.forEach(c => { c.kind0 = c.kind; c.label0 = c.label; c.hl0 = c.highlight; });
+  const kopts = Object.entries(D.kinds).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
+  $("#cb-kind").innerHTML = `<option value="">— не менять —</option>` + kopts;
+  $("#c-file").innerHTML = `<option value="">во всех файлах</option>` + D.files.filter(f => !f.skip).map(f => `<option>${esc(f.file)}</option>`).join("");
+  const groups = [...new Set(D.files.map(f => f.group))];
+  $("#f-g").innerHTML = `<option value="">все группы</option>` + groups.map(g => `<option value="${esc(g)}">${g === "без номера" ? g : "отчёты " + esc(g) + ".*"}</option>`).join("");
+  $("#f-s").innerHTML = `<option value="">все структуры</option>` + [...new Set(D.files.map(f => f.structure))].filter(Boolean)
+    .map(s => `<option value="${s}">структура ${s} (${D.files.filter(f => f.structure === s).length} ф.)</option>`).join("");
+  const nd = D.columns.filter(c => c.doubt).length, nfd = D.files.filter(f => f.doubt).length;
+  $("#summary").innerHTML = `<span class="pill">CSV: ${D.n_files}</span><span class="pill">структур: ${D.n_structures}</span>` +
+    `<span class="pill">колонок: ${D.columns.length}</span>` + (nd ? `<span class="pill warn">колонок с пометками: ${nd}</span>` : "") +
+    (D.broken.length ? `<span class="pill bad">не прочитано: ${D.broken.length}</span>` : "");
+  $("#b-cols").textContent = nd; $("#b-cols").classList.toggle("hidden", !nd);
+  $("#b-files").textContent = nfd; $("#b-files").classList.toggle("hidden", !nfd);
+  $("#c-f").value = nd ? "doubt" : "all";
+  renderCols(); renderFiles(); renderBroken(); setTab(tab);
 }
 
-function typeCard(t, i) {
-  const metrics = t.columns.filter(c => c.metric && !c.formula).length;
-  const name = t.files.length === 1 ? t.files[0].file : `${t.files[0].file} и ещё ${t.files.length - 1}`;
-  const wide = t.columns.length > 30;
-  return `<details class="type" data-t="${i}" ${t.doubt ? "open" : ""}>
-  <summary><span class="tname">Тип ${i + 1}: ${t.files.length} файл(ов)</span>
-  <span class="tmeta">${esc(name)} · ${t.hierarchy ? "иерархия · " : ""}колонок ${t.n_source} · метрик ${metrics}</span>
-  ${t.doubt ? '<span class="pill warn">есть сомнения</span>' : '<span class="pill">распознано уверенно</span>'}</summary>
-  <div class="tbody">
-  <div class="tools">
-   ${t.totals_applicable ? `<label><input type="checkbox" data-totals ${t.totals ? "checked" : ""}> строка «Итого» под шапкой</label>` : ""}
-   ${wide ? `<label><input type="checkbox" data-onlydoubt checked> показывать только сомнительные и метрики</label>` : ""}
-  </div>
-  <div class="scroll"><table><thead><tr><th>№</th><th>Колонка в CSV</th><th>Подпись в шапке</th><th>Вид</th><th>Пример</th>
-  <th title="подсветка шкалой «рост / снижение»">Подсветка</th><th title="сортировка в иерархии и выделенная колонка">Главная</th><th>Пометки</th></tr></thead>
-  <tbody>${t.columns.map((c, j) => colRow(t, c, j, wide)).join("")}</tbody></table></div>
-  <h3 style="font-size:15px;margin:16px 0 6px;color:var(--title)">Листы</h3>
-  <div class="scroll"><table class="files"><thead><tr><th>Файл</th><th>Имя листа (до 31 симв.)</th><th>Описание под заголовком</th><th>Строк</th><th>Замечания</th></tr></thead><tbody>
-  ${t.files.map((f, k) => `<tr><td>${esc(f.file)}</td>
-   <td><input type="text" maxlength="31" data-sheet="${k}" value="${esc(f.sheet)}" aria-label="Имя листа для ${esc(f.file)}"></td>
-   <td><input type="text" data-desc="${k}" value="${esc(f.description)}" aria-label="Описание для ${esc(f.file)}"></td>
-   <td>${f.rows}</td><td class="note">${esc((f.notes || []).join("; "))}</td></tr>`).join("")}</tbody></table></div>
-  </div></details>`;
+// ---------- вкладки
+$$(".tabs button").forEach(b => b.onclick = () => setTab(b.dataset.tab));
+function setTab(t) { tab = t;
+  $$(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
+  $("#p-book").classList.toggle("hidden", t !== "book"); $("#p-cols").classList.toggle("hidden", t !== "cols");
+  $("#p-files").classList.toggle("hidden", t !== "files"); $("#layout").classList.toggle("hidden", t === "book"); }
+
+// ---------- колонки
+const isMetric = k => !["dimension", "skip", "level", "name", "subrow"].includes(k);
+// пометки, на которые уже ответили вручную, не показываются: вид задан — «угадан по цифрам» снят, подпись — «тех. имя»
+function liveFlags(c) { return c.flags.filter(f => f.startsWith("техническое имя") ? !c.set_label : !c.set_kind); }
+function visibleCols() {
+  const q = $("#c-q").value.trim().toLowerCase(), f = $("#c-f").value, file = $("#c-file").value;
+  return D.columns.filter(c => (!q || c.name.toLowerCase().includes(q) || (c.label || "").toLowerCase().includes(q))
+    && (!file || c.files.includes(file))
+    && (f === "all" || (f === "doubt" && c.doubt) || (f === "metric" && isMetric(c.kind)) || (f === "dim" && !isMetric(c.kind))
+        || (f === "set" && (c.set_kind || c.set_label || c.set_hl)) || (f === "added" && c.formula)));
+}
+["#c-q", "#c-f", "#c-file"].forEach(s => $(s).addEventListener("input", renderCols));
+function renderCols() {
+  const rows = visibleCols();
+  $("#c-count").textContent = `показано ${rows.length} из ${D.columns.length}`;
+  $("#c-table tbody").innerHTML = rows.map(c => {
+    const i = D.columns.indexOf(c);
+    const kind = c.formula ? `<span>${esc(D.kinds[c.kind] || c.kind)} (добавлена)</span>` :
+      `<select data-ck="${i}" aria-label="Вид ${esc(c.name)}" class="${c.set_kind ? "set" : ""}">${Object.entries(D.kinds).map(([k, v]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>${c.set_kind ? '<span class="dot" title="задано вручную"></span>' : ""}`;
+    return `<tr class="${pickC.has(i) ? "picked" : ""} ${c.doubt ? "doubt" : ""}">
+    <td class="cb"><input type="checkbox" data-cp="${i}" ${pickC.has(i) ? "checked" : ""} aria-label="Выбрать ${esc(c.name)}"></td>
+    <td class="nm">${esc(c.name)}</td><td class="kind k-${c.kind}">${kind}</td>
+    <td><input type="text" data-cl="${i}" value="${esc(c.label)}" class="${c.set_label ? "set" : ""}" aria-label="Подпись ${esc(c.name)}"></td>
+    <td class="cb"><input type="checkbox" data-ch="${i}" ${c.highlight ? "checked" : ""} ${isMetric(c.kind) ? "" : "disabled"} aria-label="Подсветка ${esc(c.name)}"></td>
+    <td class="num">${c.n_files}</td><td class="sample" title="${esc(c.sample.join(", "))}">${esc(c.sample.join(", "))}</td>
+    <td class="flag">${esc(liveFlags(c).join("; "))}</td></tr>`; }).join("");
+  $("#c-all").checked = rows.length > 0 && rows.every(c => pickC.has(D.columns.indexOf(c)));
+  bulkState();
+}
+$("#c-table").addEventListener("change", e => { const t = e.target;
+  if (t.dataset.cp !== undefined) { const i = +t.dataset.cp; t.checked ? pickC.add(i) : pickC.delete(i); t.closest("tr").classList.toggle("picked", t.checked); bulkState(); return; }
+  if (t.dataset.ck !== undefined) { setKind(D.columns[+t.dataset.ck], t.value); renderCols(); schedulePreview(); }
+  if (t.dataset.ch !== undefined) { const c = D.columns[+t.dataset.ch]; c.highlight = t.checked; c.set_hl = true; schedulePreview(); }
+});
+$("#c-table").addEventListener("input", e => { const t = e.target;
+  if (t.dataset.cl !== undefined) { const c = D.columns[+t.dataset.cl]; c.label = t.value; c.set_label = t.value !== c.label0 || c.set_label; t.classList.add("set"); schedulePreview(); } });
+function setKind(c, k) { c.kind = k; c.set_kind = true;
+  if (!isMetric(k)) { c.highlight = false; c.set_hl = c.set_hl || c.hl0; }
+  else if (["delta", "delta_pct"].includes(k) && !c.highlight) { c.highlight = true; c.set_hl = true; } }
+$("#c-all").onchange = () => { visibleCols().forEach(c => { const i = D.columns.indexOf(c); $("#c-all").checked ? pickC.add(i) : pickC.delete(i); }); renderCols(); };
+function bulkState() { $("#c-bulk").classList.toggle("on", pickC.size > 0); $("#c-n").textContent = `Выбрано: ${pickC.size}`;
+  $("#f-bulk").classList.toggle("on", pickF.size > 0); $("#f-n").textContent = `Выбрано: ${pickF.size}`; }
+$("#cb-clear").onclick = () => { pickC.clear(); renderCols(); };
+$("#cb-apply").onclick = () => {
+  const k = $("#cb-kind").value, hl = $("#cb-hl").value, lb = $("#cb-label").value.trim(); let n = 0;
+  pickC.forEach(i => { const c = D.columns[i]; n++;
+    if (k && !c.formula) setKind(c, k);
+    if (hl !== "" && isMetric(c.kind)) { c.highlight = hl === "1"; c.set_hl = true; }
+    if (lb && !c.formula) { c.label = lb; c.set_label = true; } });
+  $("#cb-kind").value = ""; $("#cb-hl").value = ""; $("#cb-label").value = "";
+  status(`Применено к ${n} колонкам.`); renderCols(); schedulePreview(); };
+$("#cb-reset").onclick = () => { pickC.forEach(i => { const c = D.columns[i];
+    c.kind = c.kind0; c.label = c.label0; c.highlight = c.hl0; c.set_kind = false; c.set_label = false; c.set_hl = false; });
+  status("Выбранные колонки — снова на автоматике (после «Собрать» распознаются заново)."); renderCols(); schedulePreview(); };
+
+// ---------- файлы
+function visibleFiles() {
+  const q = $("#f-q").value.trim().toLowerCase(), g = $("#f-g").value, s = $("#f-s").value, f = $("#f-f").value;
+  return D.files.filter(x => (!q || x.file.toLowerCase().includes(q) || (x.sheet || "").toLowerCase().includes(q))
+    && (!g || x.group === g) && (!s || String(x.structure) === s)
+    && (f === "all" || (f === "doubt" && x.doubt) || (f === "notes" && x.notes.length) || (f === "skip" && x.skip)));
+}
+["#f-q", "#f-g", "#f-s", "#f-f"].forEach(s => $(s).addEventListener("input", renderFiles));
+function renderFiles() {
+  const rows = visibleFiles();
+  $("#f-count").textContent = `показано ${rows.length} из ${D.files.length}`;
+  $("#f-table tbody").innerHTML = rows.map(x => { const i = D.files.indexOf(x);
+    const keyOpts = `<option value="">авто${x.key_auto ? ": " + esc(x.key_auto) : ""}</option>` + x.key_options.map(k => `<option ${k === x.key ? "selected" : ""}>${esc(k)}</option>`).join("");
+    return `<tr class="${pickF.has(i) ? "picked" : ""} ${x.doubt ? "doubt" : ""}">
+    <td class="cb"><input type="checkbox" data-fp="${i}" ${pickF.has(i) ? "checked" : ""} aria-label="Выбрать ${esc(x.file)}"></td>
+    <td class="nm" title="${esc(x.notes.join("; "))}">${esc(x.file)}${x.hierarchy ? ' <span class="pill">иерархия</span>' : ""}${x.notes.length ? '<br><span class="note">' + esc(x.notes.join("; ")) + "</span>" : ""}</td>
+    <td><input type="text" maxlength="31" data-fs="${i}" value="${esc(x.sheet)}" class="${x.set_sheet ? "set" : ""}" ${x.skip ? "disabled" : ""} aria-label="Имя листа ${esc(x.file)}"></td>
+    <td><input type="text" data-fd="${i}" value="${esc(x.description)}" ${x.skip ? "disabled" : ""} aria-label="Описание ${esc(x.file)}"></td>
+    <td><input type="text" data-fu="${i}" value="${esc(x.subtitle)}" placeholder="как у книги" ${x.skip ? "disabled" : ""} aria-label="Подзаголовок ${esc(x.file)}"></td>
+    <td class="cb">${x.totals_applicable ? `<input type="checkbox" data-ft="${i}" ${x.totals ? "checked" : ""} aria-label="Итого ${esc(x.file)}">` : ""}</td>
+    <td>${x.key_options.length ? `<select data-fk="${i}" aria-label="Главная метрика ${esc(x.file)}">${keyOpts}</select>` : ""}</td>
+    <td class="num">${x.rows ?? "—"}×${x.cols ?? "—"}</td>
+    <td class="cb"><input type="checkbox" data-fx="${i}" ${x.skip ? "" : "checked"} aria-label="Включить ${esc(x.file)} в книгу"></td>
+    <td><button type="button" class="link" data-fv="${i}" ${x.skip ? "disabled" : ""}>просмотр</button></td></tr>`; }).join("");
+  $("#f-all").checked = rows.length > 0 && rows.every(x => pickF.has(D.files.indexOf(x)));
+  const keys = new Set(); pickF.forEach(i => D.files[i].key_options.forEach(k => keys.add(k)));
+  $("#fb-key").innerHTML = `<option value="">— не менять —</option><option value="@auto">автоматически</option>` + [...keys].map(k => `<option>${esc(k)}</option>`).join("");
+  bulkState();
+}
+$("#f-table").addEventListener("change", e => { const t = e.target, d = t.dataset;
+  if (d.fp !== undefined) { const i = +d.fp; t.checked ? pickF.add(i) : pickF.delete(i); renderFiles(); return; }
+  if (d.ft !== undefined) { D.files[+d.ft].totals = t.checked; previewIf(+d.ft); }
+  if (d.fk !== undefined) { D.files[+d.fk].key = t.value; previewIf(+d.fk); }
+  if (d.fx !== undefined) { D.files[+d.fx].skip = !t.checked; renderFiles(); }
+});
+$("#f-table").addEventListener("input", e => { const t = e.target, d = t.dataset;
+  if (d.fs !== undefined) { const x = D.files[+d.fs]; x.sheet = t.value; x.set_sheet = true; t.classList.add("set"); }
+  if (d.fd !== undefined) { D.files[+d.fd].description = t.value; previewIf(+d.fd); }
+  if (d.fu !== undefined) { D.files[+d.fu].subtitle = t.value; } });
+$("#f-table").addEventListener("click", e => { const d = e.target.dataset; if (d.fv !== undefined) openPreview(D.files[+d.fv].file); });
+$("#f-all").onchange = () => { visibleFiles().forEach(x => { const i = D.files.indexOf(x); $("#f-all").checked ? pickF.add(i) : pickF.delete(i); }); renderFiles(); };
+$("#fb-clear").onclick = () => { pickF.clear(); renderFiles(); };
+function sheetFrom(x, how) { const m = x.file.replace(/\.csv$/i, "").replace(/_\d{8,}$/, "");
+  const no = (x.sheet_auto.match(/^(?:Отчёт )?(\d+(?:\.\d+)*)/) || [])[1] || "";
+  const rest = x.sheet_auto.replace(/^(?:Отчёт )?\d+(?:\.\d+)*\s*/, "") || m.replace(/_/g, " ");
+  return ({auto: x.sheet_auto, no: no || rest, otch: no ? "Отчёт " + no : rest, norest: (no + " " + rest).trim(), rest})[how].slice(0, 31); }
+$("#fb-apply").onclick = () => {
+  const sh = $("#fb-sheet").value, sub = $("#fb-sub").value.trim(), tot = $("#fb-tot").value, key = $("#fb-key").value, sk = $("#fb-skip").value; let n = 0;
+  pickF.forEach(i => { const x = D.files[i]; n++;
+    if (sh) { x.sheet = sheetFrom(x, sh); x.set_sheet = sh !== "auto"; }
+    if (sub) x.subtitle = sub;
+    if (tot !== "" && x.totals_applicable) x.totals = tot === "1";
+    if (key === "@auto") x.key = ""; else if (key && x.key_options.includes(key)) x.key = key;
+    if (sk !== "") x.skip = sk === "1"; });
+  ["#fb-sheet", "#fb-tot", "#fb-key", "#fb-skip"].forEach(s => $(s).value = ""); $("#fb-sub").value = "";
+  status(`Применено к ${n} файлам.`); renderFiles(); schedulePreview(); };
+function renderBroken() { $("#broken").innerHTML = D.broken.length ? `<p class="note" style="margin:10px 0 4px">Не прочитаны (${D.broken.length}):</p>` +
+  D.broken.map(b => `<div class="note">${esc(b.file)} — ${esc(b.reason)}</div>`).join("") : ""; }
+
+// ---------- предпросмотр
+function payload(extra) { return Object.assign({folder: D.folder, out: $("#out").value.trim(),
+  book: {title: $("#title").value, subtitle: $("#subtitle").value, period: $("#period").value,
+         positive_is: document.querySelector("input[name=grow]:checked").value, palette: document.querySelector("input[name=pal]:checked").value},
+  columns: D.columns, files: D.files}, extra || {}); }
+function openPreview(file) { pvFile = file; $("#prev").classList.remove("hidden"); $("#layout").classList.add("with-preview"); loadPreview(); }
+$("#pv-close").onclick = () => { pvFile = null; $("#prev").classList.add("hidden"); $("#layout").classList.remove("with-preview"); };
+$("#pv-refresh").onclick = () => loadPreview();
+let pvTimer = null;
+function schedulePreview() { if (!pvFile) return; clearTimeout(pvTimer); pvTimer = setTimeout(loadPreview, 500); }
+function previewIf(i) { if (pvFile === D.files[i].file) schedulePreview(); }
+$("#c-file").addEventListener("change", () => { if ($("#c-file").value) openPreview($("#c-file").value); });
+async function loadPreview() {
+  if (!pvFile) return; $("#pv-name").textContent = "Предпросмотр: " + pvFile;
+  try { const p = await api("/api/preview", payload({file: pvFile}));
+    $("#pv-body").innerHTML = `<div class="xl-title">${esc(p.title)}</div>${$("#subtitle").value ? `<div class="xl-sub">${esc($("#subtitle").value)}</div>` : ""}
+    <div class="xl-desc">${esc(p.description)}</div><table class="xl">${p.rows.map(r => `<tr>${r.map(c =>
+      `<td${c.rs > 1 ? ` rowspan="${c.rs}"` : ""}${c.cs > 1 ? ` colspan="${c.cs}"` : ""} style="${c.bg ? "background:" + c.bg + ";" : ""}${c.b ? "font-weight:700;" : ""}${c.i ? "font-style:italic;" : ""}${c.fg ? "color:" + c.fg + ";" : ""}text-align:${c.al === "center" ? "center" : c.al === "right" ? "right" : "left"};${c.ind ? "padding-left:" + (6 + c.ind * 12) + "px;" : ""}">${esc(c.v)}</td>`).join("")}</tr>`).join("")}</table>
+    <p class="xl-more">Показано строк: ${p.shown} из ${p.total}${p.cols > p.cols_shown ? `, колонок: ${p.cols_shown} из ${p.cols}` : ""}. Раскраска на превью — по показанным строкам.${p.notes.length ? "<br>" + esc(p.notes.join("; ")) : ""}</p>`; }
+  catch (e) { $("#pv-body").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; }
 }
 
-function colRow(t, c, j, wide) {
-  const hide = wide && !c.doubt && !c.metric ? ' data-quiet="1" class="hidden"' : (c.doubt ? ' class="doubt"' : "");
-  const kind = c.fixed ? `<span>${esc(c.fixed)}</span>` : c.formula ? `<span>${esc(KINDS[c.kind] || c.kind)} (добавлена)</span>`
-    : `<select data-kind="${j}" aria-label="Вид колонки ${esc(c.name)}">${Object.entries(KINDS).map(([k, v]) =>
-      `<option value="${k}" ${k === c.kind ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>`;
-  return `<tr${hide}><td class="num">${j + 1}</td><td>${esc(c.name)}</td>
-  <td>${c.formula ? esc(c.label) : `<input type="text" class="label-in" data-label="${j}" value="${esc(c.label)}" aria-label="Подпись для ${esc(c.name)}">`}</td>
-  <td class="kind k-${c.kind}" data-kcell="${j}">${kind}</td>
-  <td class="sample" title="${esc(c.sample.join(", "))}">${esc(c.sample.join(", "))}</td>
-  <td>${c.metric || !c.fixed ? `<input type="checkbox" data-hl="${j}" ${c.highlight ? "checked" : ""} ${c.metric ? "" : "disabled"} aria-label="Подсвечивать ${esc(c.name)}">` : ""}</td>
-  <td>${c.sumable || (c.editable && !c.fixed) ? `<input type="radio" name="main${t.id}" data-main="${j}" ${c.main ? "checked" : ""} ${c.sumable ? "" : "disabled"} aria-label="Главная метрика ${esc(c.name)}">` : ""}</td>
-  <td class="flag">${esc(c.flags.join("; "))}</td></tr>`;
-}
-
-function bind() {
-  document.querySelectorAll("details.type[data-t]").forEach(card => {
-    const t = data.types[+card.dataset.t];
-    card.querySelectorAll("[data-kind]").forEach(sel => sel.onchange = () => {
-      const c = t.columns[+sel.dataset.kind]; c.kind = sel.value;
-      const metric = !["dimension", "skip"].includes(c.kind);
-      c.metric = metric; c.sumable = ["count", "money", "number"].includes(c.kind);
-      const row = sel.closest("tr");
-      row.querySelector("[data-kcell]").className = "kind k-" + c.kind;
-      const hl = row.querySelector("[data-hl]"); if (hl) { hl.disabled = !metric; if (!metric) { hl.checked = false; c.highlight = false; } }
-      if (["delta", "delta_pct"].includes(c.kind) && hl) { hl.checked = true; c.highlight = true; }
-      const mn = row.querySelector("[data-main]"); if (mn) { mn.disabled = !c.sumable; if (!c.sumable && mn.checked) { mn.checked = false; c.main = false; } }
-    });
-    card.querySelectorAll("[data-label]").forEach(inp => inp.oninput = () => { t.columns[+inp.dataset.label].label = inp.value; });
-    card.querySelectorAll("[data-hl]").forEach(cb => cb.onchange = () => { t.columns[+cb.dataset.hl].highlight = cb.checked; });
-    card.querySelectorAll("[data-main]").forEach(rb => rb.onchange = () => { t.columns.forEach((c, j) => c.main = j === +rb.dataset.main); });
-    const tot = card.querySelector("[data-totals]"); if (tot) tot.onchange = () => { t.totals = tot.checked; };
-    card.querySelectorAll("[data-sheet]").forEach(inp => inp.oninput = () => { t.files[+inp.dataset.sheet].sheet = inp.value; });
-    card.querySelectorAll("[data-desc]").forEach(inp => inp.oninput = () => { t.files[+inp.dataset.desc].description = inp.value; });
-    const only = card.querySelector("[data-onlydoubt]");
-    if (only) only.onchange = () => card.querySelectorAll("tr[data-quiet]").forEach(r => r.classList.toggle("hidden", only.checked));
-  });
-}
-
+// ---------- сборка
 $("#build").onclick = async () => {
-  const sheets = data.types.flatMap(t => t.files.map(f => f.sheet.trim().toLowerCase()));
-  const dup = sheets.find((s, i) => s && sheets.indexOf(s) !== i);
-  if (dup) { setStatus(`Имя листа «${dup}» повторяется — исправьте, иначе к одному добавится «(2)».`); }
-  const payload = {folder: data.folder, out: $("#out").value.trim(),
-    book: {title: $("#title").value, subtitle: $("#subtitle").value, period: $("#period").value,
-           positive_is: document.querySelector("input[name=grow]:checked").value,
-           palette: document.querySelector("input[name=pal]:checked").value},
-    types: data.types};
-  $("#build").disabled = true; setStatus("Собираю книгу… на больших файлах это может занять минуты.");
-  try {
-    const j = await api("/api/build", payload);
-    $("#result").innerHTML = `<section class="card"><h2>Результат</h2>
-      ${j.ok ? `<div class="okmsg">Готово: ${esc(j.out)}</div>
-      <div class="row" style="margin-top:12px"><button type="button" class="primary" id="openBook">Открыть книгу</button>
-      <button type="button" id="openDir">Открыть папку</button></div>` : `<div class="err">Книга не собрана — причина в журнале ниже.</div>`}
-      <pre class="log">${esc(j.log)}</pre></section>`;
-    if (j.ok) {
-      $("#openBook").onclick = () => api("/api/open", {what: "book"}).catch(e => setStatus(e.message));
-      $("#openDir").onclick = () => api("/api/open", {what: "folder"}).catch(e => setStatus(e.message));
-    }
-    setStatus(j.ok ? "Книга собрана. Настройки сохранены в report.yaml в папке с CSV." : "Не получилось — см. журнал.");
-    $("#result").scrollIntoView({behavior: "smooth"});
-  } catch (e) { setStatus(e.message); }
-  finally { $("#build").disabled = false; }
+  $("#build").disabled = true; status("Собираю книгу… на больших файлах это может занять минуты.");
+  try { const j = await api("/api/build", payload());
+    $("#result").innerHTML = `<h2 style="font:700 16px Arial;color:var(--title);margin:16px 0 6px">Результат</h2>${j.ok ? `<div class="msg ok">Готово: ${esc(j.out)}</div>
+      <div style="display:flex;gap:8px"><button type="button" class="primary" id="openBook">Открыть книгу</button><button type="button" id="openDir">Открыть папку</button></div>`
+      : `<div class="msg err">Книга не собрана — причина в журнале.</div>`}<pre class="log">${esc(j.log)}</pre>`;
+    if (j.ok) { $("#openBook").onclick = () => api("/api/open", {what: "book"}).catch(e => status(e.message));
+                $("#openDir").onclick = () => api("/api/open", {what: "folder"}).catch(e => status(e.message)); }
+    status(j.ok ? "Книга собрана. Настройки сохранены в report.yaml в папке с CSV." : "Не получилось — см. журнал.");
+    $("#result").scrollIntoView({block: "start"}); }
+  catch (e) { status(e.message); } finally { $("#build").disabled = false; }
 };
 </script>
 </body>
 </html>
-""".replace("%KINDS%", json.dumps(KIND_LABELS, ensure_ascii=False))
+"""
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Веб-приложение: Excel-отчёты из папки CSV (локально)")
+    ap = argparse.ArgumentParser(description="Отчёт-мейкер: Excel-книга из папки CSV любой структуры (локально)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="не открывать браузер автоматически")
     a = ap.parse_args()
