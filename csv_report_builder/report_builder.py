@@ -207,7 +207,8 @@ RX = {
     "name": re.compile(r"^(наименование|название|name|наим\.?)$", re.I),
     "subrow": re.compile(r"^из них$", re.I),
     "id": re.compile(r"(^|[_\s])(id|code|cod|код|кода|инн|inn|огрн|ogrn|кпп|kpp|снилс|snils|окпо|okpo|окато|okato|"
-                     r"октмо|oktmo|gid|pat_id|полис|polis|enp|номер|num|nom)"
+                     r"октмо|oktmo|gid|pat_id|полис|polis|enp|номер|num|nom|ord|order|sort|rank|type|flag|"
+                     r"порядок|тип|признак|категория|кат|статус|status|класс|class)"
                      r"($|[_\s])|^(№|n|no|nn|пп|№ п/п)$", re.I),
     "period": re.compile(r"^(год|year|месяц|month|квартал|quarter|период|period|дата|date)\b", re.I),
     "delta_pct": re.compile(r"^(Δ|δ)\s*%|^(дельта|delta|изм\w*)\s*%", re.I),
@@ -220,7 +221,7 @@ RX = {
 YEAR_RE = re.compile(r"^(?P<pre>.*?)[\s_,]*(?P<year>(?:19|20)\d\d)(?!\d)(?P<post>.*)$")
 SUBROW_RE = re.compile(r"^\s*из них\b", re.I)
 TOTAL_RE = re.compile(r"^\s*(всего|итого|total)\b", re.I)
-INT_TEXT = re.compile(r"^-?[1-9]\d{0,14}$")
+INT_TEXT = re.compile(r"^-?(0|[1-9]\d{0,14})$")          # «0» — число; «01» (ведущий ноль) — текст
 DATE_LIKE = re.compile(r"^\d{1,4}[.\-/]\d{1,2}[.\-/]\d{1,4}([ T]\d{1,2}:\d{2}(:\d{2})?)?$")
 NULLS = {"", "\\N", "NULL", "null", "None", "nan", "NaN", "#N/A"}
 
@@ -489,6 +490,12 @@ def parse_dates(series):
     return best, (best_fmt if best_n > 0 else None)
 
 
+def is_code_name(name):
+    """Имя кода / номера / типа (ORD, CASE_TYPE, Код МО, Порядок…), если в нём нет признака метрики
+    («Order amount», «Сумма по типу» — метрики)."""
+    return bool(RX["id"].search(name)) and not RX["money"].search(name) and not RX["count"].search(name)
+
+
 def norm(text):
     return re.sub(r"[^0-9a-zа-яё]", "", str(text).lower())
 
@@ -510,7 +517,7 @@ def analyze_column(name, series, rule):
     leading_zero = nonempty.str.match(r"^0\d").any() if len(nonempty) else False
     if role is None:
         if len(nonempty) and numeric_share >= 0.98 and not leading_zero \
-                and not RX["id"].search(name) and not RX["period"].match(name):
+                and not is_code_name(name) and not RX["period"].match(name):
             role = "metric"
         else:
             role = "dimension"
@@ -1038,12 +1045,13 @@ def write_sheet(ws, rep, fc, cfg, st):
     if str(table.get("totals", "auto")).lower() == "auto" and any(is_total):
         totals_on = False
     # строки: шапка -> «Итого» -> номера колонок (на них автофильтр) -> данные;
-    # «Итого» стоит под шапкой, но вне диапазона фильтра — сортировка и фильтр его не трогают
+    # строки: шапка -> номера колонок -> «Итого» -> данные. Автофильтр встаёт на «Итого» (строку заголовков
+    # фильтра Excel не фильтрует и не сортирует) — итог всегда на месте, фильтруются только данные
     two_level = any(c.group for c in cols)
     head1, head2 = 5, 5 + (1 if two_level else 0)
-    total_row = head2 + 1 if totals_on else None
-    numbers_row = (total_row or head2) + 1 if table.get("column_numbers", True) else None
-    first_data = (numbers_row or total_row or head2) + 1
+    numbers_row = head2 + 1 if table.get("column_numbers", True) else None
+    total_row = (numbers_row or head2) + 1 if totals_on else None
+    first_data = (total_row or numbers_row or head2) + 1
     last_data = first_data + n - 1
 
     # --- шапка
@@ -1320,9 +1328,8 @@ def write_sheet(ws, rep, fc, cfg, st):
             lead += 1
         fcols = lead if 0 < lead <= 3 and sum(widths[col_idx[id(c)]] for c in cols[:lead]) <= 100 else (1 if lead else 0)
     ws.freeze_panes = ws.cell(first_data, offset + 1 + int(fcols))
-    filter_row = numbers_row or total_row or head2
-    # без строки номеров фильтр встал бы на «Итого» — тогда без фильтра
-    if not rep.hierarchy and table.get("autofilter", True) and n and (numbers_row or not total_row):
+    filter_row = total_row or numbers_row or head2
+    if not rep.hierarchy and table.get("autofilter", True) and n:
         ws.auto_filter.ref = f"A{filter_row}:{get_column_letter(ncols)}{last_data}"
     total_width = sum(w for ci, w in widths.items() if not ws.column_dimensions[get_column_letter(ci)].hidden)
     paper = style.get("paper", "auto")

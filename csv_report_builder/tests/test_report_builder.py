@@ -100,11 +100,12 @@ def test_live_mode_writes_formulas(hierarchy_dir):
 def test_flat_totals_are_values(tmp_path):
     write_csv(tmp_path / "s.csv", ["Товар", "Кол-во 2026", "Кол-во 2025"], [["a", 5, 2], ["b", 1, 4]])
     ws = build(tmp_path).worksheets[1]
-    # шапка (5–6) -> «Итого» (7) -> номера колонок с автофильтром (8) -> данные (9…)
-    assert ws.cell(5, 1).value == "Товар"
-    total = [ws.cell(7, i).value for i in range(1, 6)]
+    # шапка (5–6) -> номера колонок (7) -> «Итого» (8, на нём автофильтр: строку заголовков фильтра Excel
+    # не фильтрует и не сортирует) -> данные (9…)
+    assert ws.cell(5, 1).value == "Товар" and ws.cell(7, 1).value == 1
+    total = [ws.cell(8, i).value for i in range(1, 6)]
     assert total == ["Итого", 6, 6, 0, 0.0]
-    assert ws.cell(8, 1).value == 1 and ws.auto_filter.ref.startswith("A8:")
+    assert ws.auto_filter.ref.startswith("A8:")
     assert ws.cell(9, 1).value == "a" and ws.freeze_panes.endswith("9")
 
 
@@ -218,7 +219,7 @@ def test_column_group_colours_and_no_sum_for_numbers(ambiguous_dir):
         heads.setdefault(ws.cell(6, c).value or ws.cell(5, c).value,
                          fill_of(ws.cell(6, c)) or fill_of(ws.cell(5, c)))
     assert heads["Случаи"] == "DCE8F3" and heads["Балл"] == "D6ECEC"
-    total = {ws.cell(5, c).value: ws.cell(7, c).value for c in range(1, ws.max_column + 1)}
+    total = {ws.cell(5, c).value: ws.cell(8, c).value for c in range(1, ws.max_column + 1)}
     assert total["Балл"] is None                              # баллы в «Итого» не складываются
 
 
@@ -319,10 +320,10 @@ def test_blank_rows_skipped_with_note(tmp_path):
 def test_totals_label_when_first_column_is_metric(tmp_path):
     write_raw(tmp_path / "x.csv", "Значение;Комментарий\n1;\n2;а\n")
     ws = build(tmp_path).worksheets[1]
-    assert [ws.cell(6, c).value for c in (1, 2)] == [3, "Итого"]
+    assert [ws.cell(7, c).value for c in (1, 2)] == [3, "Итого"]
     write_raw(tmp_path / "x.csv", "Случаи;Сумма\n1;2\n")               # одни метрики — подпись в колонке «№»
     ws = build(tmp_path).worksheets[1]
-    assert ws.cell(6, 1).value == "Итого"
+    assert ws.cell(7, 1).value == "Итого"
 
 
 def mixed_folder(tmp_path):
@@ -428,3 +429,12 @@ def test_default_sheet_names_drop_common_part():
     assert R.default_sheet_name(files[1], files) == "Отчёт 1.1"
     assert R.default_sheet_name("ref.csv", files) == "ref"
     assert R.default_sheet_name("rep_x_2.csv", ["rep_x_2.csv", "sales_3.csv"]) == "2 rep x"
+
+
+def test_code_columns_are_not_summed(tmp_path):
+    """Справочник: ORD (1, 2, 0…) — код, не метрика: без «Итого 42» и с кодом 0, а не «-»."""
+    write_raw(tmp_path / "ord.csv", "ORD;CASE_TYPE;ORD_NAME\n1;HOSP;плановая\n2;HOSP;экстренная\n0;AMB;самотек\n")
+    ws = build(tmp_path).worksheets[1]
+    assert [ws.cell(r, 1).value for r in (5, 6, 7, 8, 9)] == ["ORD", 1, 1, 2, 0]   # шапка, номера, данные
+    assert isinstance(ws.cell(9, 1).value, int) and "\\-" not in ws.cell(9, 1).number_format   # 0, а не «-»
+    assert R.is_code_name("ORD") and R.is_code_name("CASE_TYPE") and not R.is_code_name("Order amount 2026")
