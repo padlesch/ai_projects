@@ -7,8 +7,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, '..', 'src', 'modОтчетИзСводнойV3.bas')
 sys.path.insert(0, HERE)
 from runbasic import Basic
+import excel_merge
 
 RS, US, GS = chr(30), chr(31), chr(29)
+PERM = {i: 11 - i for i in range(1, 11)}   # обратный порядок полей
 LT_REG, LT_SUB, LT_GRAND, LT_BLANK = 0, 1, 2, 3
 CT_ITEM, CT_SUB, CT_GRAND = 1, 2, 3
 
@@ -66,10 +68,13 @@ def render(root, depth, layout, subt, repeat, grand, info, blanks):
                     if repeat or not shown[a - 1]:
                         put(c, a, path[a - 1], CT_ITEM)
                         shown[a - 1] = True
-            put(c, d, node.name, CT_ITEM)
+            # Итоги вверху: строка родителя — это и есть итог, Excel отдаёт её
+            # как линию промитога, подпись — просто имя без «Итог»
+            top_sub = (not leaf) and subt == 'top'
+            put(c, d, node.name, CT_SUB if top_sub else CT_ITEM)
             hv = leaf or subt == 'top'
             kind = 'node' if (leaf or subt != 'bottom') else 'header'
-            rows.append([LT_REG, hv, c, kind, tuple(path)])
+            rows.append([LT_SUB if top_sub else LT_REG, hv, c, kind, tuple(path)])
             for a in range(len(shown)):
                 if a >= d - 1:
                     shown[a] = True
@@ -108,6 +113,17 @@ def render(root, depth, layout, subt, repeat, grand, info, blanks):
                 cl[1], cl[2] = -1, 0
         elif info == 'field':     # типы и поля ячеек, без оси
             r[0] = -1
+        elif info == 'flat':      # модель данных: у всех ячеек «одно поле»
+            for cl in r[2]:
+                if cl[0]:
+                    cl[2] = 1
+        elif info == 'perm':      # номера полей не совпадают с вложенностью
+            for cl in r[2]:
+                if cl[2] > 0:
+                    cl[2] = PERM[cl[2]]
+        elif info == 'noindent':  # сжатый макет без отступа: различают только поля
+            for cl in r[2]:
+                cl[3] = 0
         elif info == 'partial':   # поле известно, кроме ячеек итогов
             r[0] = -1
             for cl in r[2]:
@@ -173,10 +189,10 @@ def check(case, rows, ncol, out, root):
         d = len(path)
         if dep != d:
             errs.append(f'{path}: глубина {dep}, ждали {d}')
-        has_child = any(p[:d] == path and len(p) > d for p in owned) or \
-            (layout == 'tabular' and d < depth_)
-        if (cls == 'S') != has_child:
-            errs.append(f'{path}: класс {cls!r}, детей {has_child}')
+        # раскраска по уровню: всё выше нижнего уровня — уровень, низ — детализация
+        upper = d < depth_
+        if (cls == 'S') != upper:
+            errs.append(f'{path}: класс {cls!r}, уровень {d} из {depth_}')
         anc_owned = sum(1 for a in range(1, d) if path[:a] in owned)
         if olv != min(1 + anc_owned, 8):
             errs.append(f'{path}: уровень группировки {olv}, ждали {1 + anc_owned}')
@@ -211,10 +227,12 @@ def rows_cases(n_random, rnd):
     for depth in range(1, 11):
         for layout, subt, repeat, grand, info, blanks in itertools.product(
                 layouts, ['none', 'top', 'bottom'], [False, True], [False, True],
-                ['field', 'geom', 'lt', 'partial'], [False, True]):
+                ['field', 'geom', 'lt', 'partial', 'flat', 'perm', 'noindent'], [False, True]):
             if layout == 'tabular' and subt == 'top':
                 continue        # Excel так не умеет
             if layout == 'compact' and repeat:
+                continue
+            if info == 'noindent' and layout != 'compact':
                 continue
             cases.append((depth, layout, subt, repeat, grand, info, blanks))
     rnd.shuffle(cases)
@@ -268,12 +286,12 @@ def run_cols(b):
              (1, '', ['A']), (1, '', ['B'])]
     tests.append((col_case(lines, 3, 0, ['Сумма']),
                   [7, 3, 1, 2, 8, 6, 4, 5]))
-    # 3) две меры под годом: мера выносится наверх, итоги — по мере
+    # 3) две меры под годом: порядок как в сводной (год, под ним меры), итоги — слева
     lines = [(0, 'S1', ['2023', 'S1']), (0, 'S2', ['2023', 'S2']),
              (0, 'S1', ['2024', 'S1']), (0, 'S2', ['2024', 'S2']),
              (2, '', []), (2, '', [])]
     tests.append((col_case(lines, 2, 2, ['S1', 'S2']),
-                  [5, 1, 3, 6, 2, 4]))
+                  [5, 6, 1, 2, 3, 4]))
     out = b.call('ТестСтолбцы', GS.join(t for t, _ in tests)).split(GS)
     for n, ((_, exp), o) in enumerate(zip(tests, out), 1):
         got = [int(l.split(RS)[0]) for l in o.split('\n') if l]
@@ -282,6 +300,76 @@ def run_cols(b):
             print(f'FAIL столбцы {n}: ждали {exp}, вышло {got}')
             print('   ', [l.split(RS) for l in o.split('\n') if l])
     print(f'столбцы: {len(tests) - fails}/{len(tests)} кейсов прошли')
+    return fails + run_cols_sheet(b)
+
+
+def sheet_case(rows, clt, meas, typed):
+    nC = len(rows[0])
+    head = RS.join([str(nC), str(len(rows)), str(len(meas))] + meas)
+    lines = [head]
+    for r, row in enumerate(rows):
+        cells = []
+        for j, t in enumerate(row):
+            if not typed:
+                ct = -1
+            elif not t:
+                ct = -1
+            elif clt[j] == 2:
+                ct = CT_GRAND
+            elif clt[j] == 1:
+                ct = CT_SUB
+            elif t in meas:
+                ct = 4
+            else:
+                ct = CT_ITEM
+            cells.append(US.join([t, str(ct)]))
+        lines.append(RS.join(cells))
+    lines.append(RS.join(str(x if typed else -1) for x in clt))
+    return '\n'.join(lines)
+
+
+def run_cols_sheet(b):
+    # шапка как на листе: ожидаемый порядок столбцов и подписи уровней
+    A = ([['2023', '', '2023 Итог', '2024', '2024 Итог', 'Общий итог'],
+          ['Янв', 'Фев', '', 'Янв', '', '']], [0, 0, 1, 0, 1, 2], ['Сумма'],
+         [6, 3, 1, 2, 5, 4],
+         {1: ['2023', 'Янв'], 3: ['2023', 'Итог'], 4: ['2024', 'Янв'], 6: ['Общий итог', '']})
+    C = ([['2023', '', '2024', '', 'Итог Сумма X', 'Итог Сумма Y'],
+          ['Сумма X', 'Сумма Y', 'Сумма X', 'Сумма Y', '', '']], [0, 0, 0, 0, 2, 2], ['Сумма X', 'Сумма Y'],
+         [5, 6, 1, 2, 3, 4],
+         {1: ['2023', 'Сумма X'], 2: ['2023', 'Сумма Y'], 5: ['Общий итог', 'Сумма X'], 6: ['Общий итог', 'Сумма Y']})
+    # меры сверху, первый элемент пустой (как в модели данных пользователя)
+    R = ([['дельта', '', '', 'сумма', '', ''],
+          ['', 'Другое', 'Основные', '', 'Другое', 'Основные']], [0] * 6, ['дельта', 'сумма'],
+         [1, 2, 3, 4, 5, 6],
+         {1: ['дельта', ''], 2: ['дельта', 'Другое'], 4: ['сумма', ''], 6: ['сумма', 'Основные']})
+    tests = []
+    for name, (rows, clt, meas, order, labels) in (('годы', A), ('меры внизу', C), ('меры сверху, пустой элемент', R)):
+        for typed in (True, False):
+            tests.append((f'{name}, типы {"известны" if typed else "неизвестны"}', sheet_case(rows, clt, meas, typed), order, labels))
+    out = []
+    lost_all = []
+    for t in tests:
+        out.append(b.call('ТестШапкиЛист', t[1]).split(GS)[0])
+        lost, _ = excel_merge.lost_labels(b.call('ПланТекстом'))
+        lost_all.append(lost)
+    fails = 0
+    for (name, *_), lost in zip(tests, lost_all):
+        if lost:
+            fails += 1
+            print(f'FAIL шапка «{name}»: Excel сотрёт подписи при объединении: {lost}')
+    for (name, _, order, labels), o in zip(tests, out):
+        got = [l.split(RS) for l in o.split('\n') if l]
+        got_order = [int(x[0]) for x in got]
+        lab = {int(x[0]): x[1:] for x in got}
+        bad = got_order != order or any(lab.get(k) != v for k, v in labels.items())
+        if bad:
+            fails += 1
+            print(f'FAIL шапка «{name}»: порядок {got_order} (ждали {order})')
+            for k, v in labels.items():
+                if lab.get(k) != v:
+                    print(f'    столбец {k}: {lab.get(k)} (ждали {v})')
+    print(f'шапка по листу: {len(tests) - fails}/{len(tests)} кейсов прошли')
     return fails
 
 

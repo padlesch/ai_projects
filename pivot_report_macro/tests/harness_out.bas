@@ -59,7 +59,7 @@ Public Function ТестВывод() As String
     ВывестиОтчёт ws, lbl, vals
     s = "ПОСТРОЕН меток=" & ТестМетки.Count & Chr(10) & Дамп(ws, 5, 13, 5)
     s = s & "ТЕКУЩАЯ=" & ТекущаяПалитра(ws) & Chr(10)
-    If ПерекраситьЛист(ws, 4) Then s = s & "ПЕРЕКРАШЕН в 4" & Chr(10) Else s = s & "НЕ ПЕРЕКРАШЕН" & Chr(10)
+    If ПерекраситьЛист(ws, 2) Then s = s & "ПЕРЕКРАШЕН в 2" & Chr(10) Else s = s & "НЕ ПЕРЕКРАШЕН" & Chr(10)
     s = s & Дамп(ws, 5, 13, 5)
     s = s & "ТЕКУЩАЯ=" & ТекущаяПалитра(ws) & Chr(10)
     s = s & "формат C8=" & ws.Cells(8, 4).NumberFormat & " D8=" & ws.Cells(8, 5).NumberFormat

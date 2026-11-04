@@ -58,11 +58,7 @@ Private Function ОдинКейс(ByVal s As String) As String
     For p = 1 To nOrd
         i = mOrd(p)
         r = i & Chr(30) & mDepth(i) & Chr(30) & mType(i) & Chr(30) & mOutLvl(p) & Chr(30)
-        If mType(i) = LT_GRAND Then
-            r = r & "G"
-        ElseIf mРодитель(i) Then
-            r = r & "S"
-        End If
+        If Len(КлассСтроки(i)) > 0 Then r = r & Left$(КлассСтроки(i), 1)
         For k = 1 To nLbl
             If mOutR(p, k) > 0 Then t = inTxt(mOutR(p, k), mOutC(p, k)) Else t = mOutLbl(p, k)
             r = r & Chr(30) & t & Chr(31) & mOutInd(p, k)
@@ -116,4 +112,63 @@ Private Function ОдинСтолбцы(ByVal s As String) As String
         r = r & Chr(10)
     Next ci
     ОдинСтолбцы = r
+End Function
+
+' ---------- шапка по листу ----------
+Public Function ТестШапкиЛист(ByVal все As String) As String
+    Dim кейсы, c As Long, out As String
+    кейсы = Split(все, Chr(29))
+    For c = 0 To UBound(кейсы)
+        If Len(кейсы(c)) > 0 Then out = out & ОднаШапка(кейсы(c)) & Chr(29)
+    Next c
+    ТестШапкиЛист = out
+End Function
+
+Private Function ОднаШапка(ByVal s As String) As String
+    Dim стр, f, g, r As Long, j As Long, k As Long, ci As Long, res As String
+    стр = Split(s, Chr(10))
+    f = Split(стр(0), Chr(30))
+    nC = CLng(f(0)): nHR = CLng(f(1)): nMeas = CLng(f(2))
+    ReDim mMeas(1 To Макс(nMeas, 1))
+    For k = 1 To nMeas: mMeas(k) = f(2 + k): Next k
+    mСлужебные = "|значения|"
+    ReDim hTxt(1 To nHR, 1 To nC): ReDim hCT(1 To nHR, 1 To nC): ReDim inCLT(1 To nC)
+    For r = 1 To nHR
+        g = Split(стр(r), Chr(30))
+        For j = 1 To nC
+            hTxt(r, j) = Split(g(j - 1), Chr(31))(0)
+            hCT(r, j) = CLng(Split(g(j - 1), Chr(31))(1))
+        Next j
+    Next r
+    g = Split(стр(nHR + 1), Chr(30))
+    For j = 1 To nC: inCLT(j) = CLng(g(j - 1)): Next j
+    ШапкаПоЛисту
+    СобратьШапку
+    ПорядокСтолбцов
+    For ci = 1 To nCOrd
+        res = res & cOrd(ci)
+        For k = 1 To nLev
+            res = res & Chr(30) & dLev(cOrd(ci), k)
+        Next k
+        res = res & Chr(10)
+    Next ci
+    ОднаШапка = res
+End Function
+
+' План объединения шапки и тексты шапки — для проверки «как в Excel»
+Public Function ПланТекстом() As String
+    Dim i As Long, k As Long, ci As Long, s As String
+    ПланШапки
+    s = nLev & Chr(30) & nCOrd & Chr(10)
+    For k = 1 To nLev
+        For ci = 1 To nCOrd
+            If ci > 1 Then s = s & Chr(30)
+            s = s & dLev(cOrd(ci), k)
+        Next ci
+        s = s & Chr(10)
+    Next k
+    For i = 1 To nОбъед
+        s = s & mОбК1(i) & Chr(30) & mОбС1(i) & Chr(30) & mОбК2(i) & Chr(30) & mОбС2(i) & Chr(10)
+    Next i
+    ПланТекстом = s
 End Function

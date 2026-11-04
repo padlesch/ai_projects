@@ -7,7 +7,6 @@ Option Explicit
 '  ќформитьќтчЄт        Ч встать в любую €чейку сводной и запустить
 '  ќформитьќтчЄтЅез¬опросов Ч то же молча, отчЄт новым листом этой книги
 '  ѕалитраќтчЄта         Ч сменить палитру готового отчЄта (активный лист)
-'  ѕалитра—ледующа€      Ч переключить палитру по кругу
 '
 '  „то делает:
 '   * снимает со сводной значени€ и структуру Ч в любом макете:
@@ -20,7 +19,6 @@ Option Explicit
 '   * несколько мер -> кажда€ мера отдельным блоком столбцов;
 '   * числовые форматы мер (%, валюта, дроби) берутс€ из сводной;
 '   * строка фильтров сводной под заголовком;
-'   * группировка строк по уровн€м (кнопки 1-2-3... слева) Ч свернуть до нужной глубины;
 '   * заголовок, нумераци€ столбцов и строк, Arial Narrow, серые границы.
 '
 '  Ќа листе после построени€ нет ничего, кроме отчЄта: ни панелей,
@@ -42,7 +40,7 @@ Private Const TXT_SUBTOT    As String = "»тог"
 Private Const TXT_EMPTY     As String = "(пусто)"
 Private Const MARGIN_CM     As Double = 0.3
 Private Const ѕјЋ_ѕќ_”ћќЋ„  As Long = 1         ' палитра нового отчЄта
-Private Const √–”ѕѕ»–ќ¬ј“№  As Boolean = True   ' кнопки свЄртки уровней слева
+Private Const √–”ѕѕ»–ќ¬ј“№  As Boolean = False  ' True Ч кнопки свЄртки уровней слева
 
 '--- типы строк/столбцов сводной (как XlPivotLineType) --------------------
 Private Const LT_REGULAR    As Long = 0
@@ -62,6 +60,8 @@ Private Const CT_BLANK      As Long = 9
 Private cTitle As Long, cBordo As Long, cHead As Long, cNum As Long
 Private cBrd As Long, cBrdOut As Long, cHeadFont As Long
 Private p“он As Boolean           ' палитра считаетс€ от цвета шапки
+Private p–амп As Boolean          ' шаблон-лестница: уровни Ч оттенки одной краски
+Private pЅаза As Long             ' основна€ краска шаблона-лестницы
 Private p»тог As Long, p”р(1 To 4) As Long, p люч As Long, pѕром ол As Long
 Private mѕал As Long
 Private Const C_ѕ–ќ„≈–  As Long = 10921638   ' RGB(166,166,166) Ч Ђ-ї вместо пусто
@@ -113,6 +113,15 @@ Private cType() As Long
 Private cOrd() As Long
 Private nCOrd As Long
 Private mGrandTxt As String       ' как общий итог назван в самой сводной
+Private mѕоѕол€м As Boolean       ' уровни вз€ты по пол€м сводной, а не по месту
+Private m—лот() As Long           ' место (столбец*1000+отступ) каждого уровн€
+Private nHR As Long               ' строк шапки столбцов над значени€ми
+Private hTxt() As String          ' (строка шапки, столбец) Ч текст на листе
+Private hCT() As Long             ' (строка шапки, столбец) Ч тип €чейки сводной
+Private inCLT() As Long           ' тип столбца из оси сводной, -1 Ч неизвестен
+Private m—лужебные As String      ' |подписи полей|Ђ«начени€ї| Ч не уровни шапки
+Private nќбъед As Long            ' план объединени€ шапки
+Private mќб 1() As Long, mќб—1() As Long, mќб 2() As Long, mќб—2() As Long
 '#ƒ≈ Ћ- ќЌ≈÷
 
 Private mLblCap() As String       ' подписи столбцов с уровн€ми строк
@@ -210,14 +219,17 @@ End Sub
 '  „тобы добавить палитру: увеличить „ислоѕалитр, дописать им€ и Case.
 '==========================================================================
 Private Function „ислоѕалитр() As Long
-    „ислоѕалитр = 4
+    „ислоѕалитр = 7
 End Function
 
 Private Function »м€ѕалитры(ByVal n As Long) As String
     Select Case n
-        Case 2: »м€ѕалитры = "—ерый"
-        Case 3: »м€ѕалитры = "A Ј старый формат (персиковые итоги)"
-        Case 4: »м€ѕалитры = "B Ј стандартный шаблон (сине-серые итоги)"
+        Case 2: »м€ѕалитры = "ѕерсиковый Ј A (старый формат)"
+        Case 3: »м€ѕалитры = "ќкеан Ч глубокий синий"
+        Case 4: »м€ѕалитры = "»зумруд Ч сине-зелЄный"
+        Case 5: »м€ѕалитры = "√рафит Ч сланцевый"
+        Case 6: »м€ѕалитры = "“ерракота"
+        Case 7: »м€ѕалитры = "’во€ Ч лесной зелЄный"
         Case Else: »м€ѕалитры = "“Ємно-синий"
     End Select
 End Function
@@ -226,16 +238,14 @@ Private Sub InitPalette(ByVal n As Long)
     If n < 1 Or n > „ислоѕалитр() Then n = 1
     mѕал = n
     p“он = False
+    p–амп = False
     cHeadFont = RGB(255, 255, 255)
     cBordo = RGB(139, 46, 60)        ' подзаголовок / фильтры
     cNum = RGB(166, 166, 166)        ' нумераци€
     cBrd = RGB(191, 191, 191)        ' внутренние границы
     cBrdOut = RGB(140, 140, 140)     ' внешн€€ рамка
     Select Case n
-        Case 2          ' серый
-            p“он = True
-            cTitle = RGB(74, 79, 85): cHead = RGB(112, 119, 126)
-        Case 3          ' A Ј старый формат
+        Case 2          ' A Ј старый формат Ч цвета из дизайна
             cTitle = RGB(31, 56, 100)       ' #1F3864 тЄмно-синий
             cBordo = RGB(154, 59, 44)       ' #9A3B2C кирпичный
             cHead = RGB(242, 242, 242)      ' #F2F2F2 шапка таблицы
@@ -249,27 +259,46 @@ Private Sub InitPalette(ByVal n As Long)
             p”р(3) = RGB(233, 243, 227)     ' #E9F3E3
             p люч = RGB(237, 237, 237)      ' #EDEDED ключева€ колонка
             pѕром ол = RGB(221, 235, 247)   ' #DDEBF7 промежуточные итоги
-        Case 4          ' B Ј стандартный шаблон
-            cTitle = RGB(27, 58, 92)        ' #1B3A5C глубокий синий
-            cBordo = RGB(45, 106, 115)      ' #2D6A73 морска€ волна
-            cHead = RGB(232, 236, 240)      ' #E8ECF0 шапка таблицы
-            cHeadFont = RGB(31, 31, 31)     ' #1F1F1F
-            cNum = RGB(102, 112, 122)       ' #66707A служебный
-            cBrdOut = RGB(154, 165, 177)    ' #9AA5B1
-            cBrd = RGB(211, 217, 223)       ' #D3D9DF
-            p»тог = RGB(201, 220, 236)      ' #C9DCEC общий итог
-            p”р(1) = RGB(220, 232, 243)     ' #DCE8F3
-            p”р(2) = RGB(234, 241, 248)     ' #EAF1F8
-            p”р(3) = RGB(238, 244, 234)     ' #EEF4EA
-            p люч = RGB(236, 239, 242)      ' #ECEFF2 ключева€ колонка
-            pѕром ол = RGB(214, 236, 236)   ' #D6ECEC бирюзовый светлый
+            p”р(4) = ќттенок(p”р(3), 0.5)
+        Case 3: Ћестницаѕалитры RGB(23, 60, 102), RGB(196, 90, 17)    ' ќкеан #173C66, акцент #C45A11
+        Case 4: Ћестницаѕалитры RGB(11, 83, 81), RGB(176, 74, 40)     ' »зумруд #0B5351, акцент #B04A28
+        Case 5: Ћестницаѕалитры RGB(45, 55, 66), RGB(166, 52, 46)     ' √рафит #2D3742, акцент #A6342E
+        Case 6: Ћестницаѕалитры RGB(122, 52, 24), RGB(31, 78, 121)    ' “ерракота #7A3418, акцент #1F4E79
+        Case 7: Ћестницаѕалитры RGB(35, 82, 52), RGB(139, 46, 60)     ' ’во€ #235234, акцент #8B2E3C
         Case Else       ' тЄмно-синий
             p“он = True
             cTitle = RGB(31, 56, 100): cHead = RGB(47, 78, 111)
     End Select
-    ' уровни глубже третьего дизайн не задаЄт Ч ещЄ светлее третьего
-    p”р(4) = ќттенок(p”р(3), 0.5)
 End Sub
+
+' Ўаблон-Ђлестницаї: одна глубока€ краска, уровни Ч еЄ оттенки от тЄмного
+' к светлому: чем главнее уровень, тем темнее заливка.
+Private Sub Ћестницаѕалитры(ByVal база As Long, ByVal акцент As Long)
+    p–амп = True
+    pЅаза = база
+    cTitle = база
+    cHead = база
+    cHeadFont = RGB(255, 255, 255)
+    cBordo = акцент
+    cNum = RGB(128, 128, 128)
+    cBrd = ќттенок(база, 0.82)
+    cBrdOut = ќттенок(база, 0.45)
+End Sub
+
+' ƒол€ осветлени€ уровн€ d в шаблоне-лестнице: 1 Ч насыщенный, дальше светлее
+Private Function яркость”ровн€(ByVal d As Long) As Double
+    Select Case d
+        Case Is <= 1: яркость”ровн€ = 0.45
+        Case 2: яркость”ровн€ = 0.6
+        Case 3: яркость”ровн€ = 0.71
+        Case 4: яркость”ровн€ = 0.79
+        Case 5: яркость”ровн€ = 0.85
+        Case 6: яркость”ровн€ = 0.89
+        Case 7: яркость”ровн€ = 0.92
+        Case 8: яркость”ровн€ = 0.945
+        Case Else: яркость”ровн€ = 0.965
+    End Select
+End Function
 
 ' ќсветление к белому: 0 Ч исходный цвет, 1 Ч чистый белый
 Private Function ќттенок(ByVal c As Long, ByVal f As Double) As Long
@@ -294,6 +323,35 @@ Private Function ÷вет–оли(ByVal стр As String, ByVal кол As String) As Long
             ÷вет–оли = ќттенок(cHead, g)
         ElseIf f >= 0 Then
             ÷вет–оли = ќттенок(cHead, f)
+        Else
+            ÷вет–оли = -1
+        End If
+        Exit Function
+    End If
+    If p–амп Then
+        ' лестница: общий итог Ч почти краска, уровни светлеют вглубь;
+        ' ключева€ колонка Ч на тон темнее своей строки
+        If стр = "G" Then
+            f = 0.18
+        ElseIf Left$(стр, 1) = "S" Then
+            d = 1
+            If Len(стр) > 1 Then d = CLng(Mid$(стр, 2))
+            f = яркость”ровн€(d)
+        Else
+            f = -1
+        End If
+        If f >= 0 Then
+            If кол = "G" Then
+                f = f - 0.08
+            ElseIf кол = "S" Then
+                f = f - 0.04
+            End If
+            If f < 0 Then f = 0
+            ÷вет–оли = ќттенок(pЅаза, f)
+        ElseIf кол = "G" Then
+            ÷вет–оли = ќттенок(pЅаза, 0.86)
+        ElseIf кол = "S" Then
+            ÷вет–оли = ќттенок(pЅаза, 0.93)
         Else
             ÷вет–оли = -1
         End If
@@ -386,7 +444,7 @@ Private Function ћетка—троки(ByVal класс As String) As String
         ћетка—троки = "RG"
     ElseIf Left$(класс, 1) = "S" Then
         d = CLng(Mid$(класс, 2))
-        If d > 4 Then d = 4
+        If d > 9 Then d = 9
         ћетка—троки = "RS" & d
     Else
         ћетка—троки = "RD"
@@ -415,18 +473,7 @@ Public Sub ѕалитраќтчЄта()
     ѕалитраЌомер CLng(otvet)
 End Sub
 
-Public Sub ѕалитра—ледующа€()
-    Dim тек As Long
-    тек = “екуща€ѕалитра(ActiveSheet)
-    If тек = 0 Then
-        MsgBox "Ќа активном листе не найден отчЄт, построенный макросом.", vbExclamation
-        Exit Sub
-    End If
-    ѕалитраЌомер тек Mod „ислоѕалитр() + 1
-End Sub
-
-' ћожно повесить на кнопку панели быстрого доступа: ѕалитраЌомер 3
-Public Sub ѕалитраЌомер(ByVal n As Long)
+Private Sub ѕалитраЌомер(ByVal n As Long)
     If n < 1 Or n > „ислоѕалитр() Then Exit Sub
     If TypeName(ActiveSheet) <> "Worksheet" Then Exit Sub
     If Not ѕерекраситьЋист(ActiveSheet, n) Then
@@ -490,8 +537,12 @@ Private Function ѕерекраситьЋист(ws As Worksheet, ByVal n As Long) As Boolean
         роль = –ольячейки(ws.Cells(r, 1))
         Select Case роль
             Case "RG": m ласс—тр(r - rData + 1) = "G"
-            Case "RS1", "RS2", "RS3", "RS4": m ласс—тр(r - rData + 1) = "S" & Right$(роль, 1)
-            Case Else: m ласс—тр(r - rData + 1) = ""
+            Case Else
+                If Left$(роль, 2) = "RS" And IsNumeric(Mid$(роль, 3)) Then
+                    m ласс—тр(r - rData + 1) = "S" & Mid$(роль, 3)
+                Else
+                    m ласс—тр(r - rData + 1) = ""
+                End If
         End Select
     Next r
     ReDim m ласс ол(1 To cLast - cData + 1)
@@ -768,72 +819,7 @@ Private Sub —н€ть—троки(pt As PivotTable, rr As Range, ByRef lbl() As Variant)
         Next k
     Next i
 
-    ' Ќе про каждую €чейку сводна€ знает поле (модель данных называет
-    ' пол€ иначе, чем RowFields). “огда второй точный источник Ч ось:
-    ' кажда€ €чейка линии оси знает свой адрес на листе, номер €чейки
-    ' в линии и есть уровень.
-    If ok And Not ”ровниѕолны() Then ”ровниѕоќси ax, rr
     Application.StatusBar = False
-End Sub
-
-' ” каждой непустой подписи (кроме общего итога) известен уровень?
-Private Function ”ровниѕолны() As Boolean
-    Dim i As Long, k As Long
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 And inCT(i, k) <> CT_GRAND And inLev(i, k) <= 0 Then
-                If inLT(i) <> LT_GRAND Then Exit Function
-            End If
-        Next k
-    Next i
-    ”ровниѕолны = True
-End Function
-
-' ”ровни по оси сводной: €чейка k линии i, лежаща€ в строке i на листе,
-' Ч это подпись уровн€ k. ЅерЄм только обычные линии; итоги получат
-' уровень по месту (ƒозаполнить”ровни), т.к. на модели данных путь итога
-' ось отдаЄт искажЄнным.
-Private Sub ”ровниѕоќси(ax As Object, rr As Range)
-    Dim i As Long, k As Long, c As Long, n As Long, ln As Object, rg As Range
-    Dim lev() As Long, поќси As Long, поѕолю As Long
-    ReDim lev(1 To nR, 1 To nLbl)
-    On Error Resume Next
-    For i = 1 To nR
-        If inLT(i) = LT_REGULAR Then
-            Set ln = ax.PivotLines(i)
-            n = 0
-            n = ln.PivotLineCells.Count
-            For k = 1 To n
-                Set rg = Nothing
-                Set rg = ln.PivotLineCells(k).Range
-                If Not rg Is Nothing Then
-                    If rg.Row = rr.Row + i - 1 Then
-                        c = rg.Column - rr.Column + 1
-                        If c >= 1 And c <= nLbl Then lev(i, c) = k
-                    End If
-                End If
-            Next k
-        End If
-        Err.Clear
-    Next i
-    On Error GoTo 0
-    ' —мешивать источники нельз€ (номера полей и номера уровней оси Ч
-    ' разные шкалы): берЄм тот, что знает больше €чеек, остальное €дро
-    ' дозаполнит по месту на листе.
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 Then
-                If lev(i, k) > 0 Then поќси = поќси + 1
-                If inLev(i, k) > 0 Then поѕолю = поѕолю + 1
-            End If
-        Next k
-    Next i
-    If поќси <= поѕолю Then Exit Sub
-    For i = 1 To nR
-        For k = 1 To nLbl
-            inLev(i, k) = lev(i, k)
-        Next k
-    Next i
 End Sub
 
 ' ѕустое значение сводной: пусто, ошибка или пуста€ строка
@@ -870,62 +856,68 @@ Private Sub —н€ть‘орматы(db As Range)
     On Error GoTo 0
 End Sub
 
-' "–егион: —евер; √од: 2024" Ч значени€ фильтров сводной
+' "–егион: —евер;   √од: 2024" Ч фильтры сводной, как они видны на листе:
+' подпись фильтра и значение в соседней клетке (ЂAllї, Ђ(несколько
+' элементов)ї, выбранный элемент). ‘ильтры Ђвсеї не пишем.
 Private Function “екст‘ильтров(pt As PivotTable) As String
-    Dim pf As PivotField, s As String, t As String, n As Long
+    Dim pf As PivotField, s As String, t As String, им€ As String
+    Dim стр() As Long, txt() As String, n As Long, i As Long, j As Long, rr As Long, tt As String
     On Error Resume Next
     n = pt.PageFields.Count
     If n = 0 Then Exit Function
+    ReDim стр(1 To n)
+    ReDim txt(1 To n)
+    n = 0
     For Each pf In pt.PageFields
-        t = ""
-        If pf.EnableMultiplePageItems Then
-            If Not ¬ыбранќдин(pf, t) Then t = "(несколько элементов)"
-        End If
-        If Len(t) = 0 Then
-            t = pf.CurrentPage.Caption
-            If Err.Number <> 0 Then Err.Clear: t = ""
-        End If
-        If Len(t) = 0 Then
-            t = „истое»м€(pf.CurrentPageName)
-            If Err.Number <> 0 Then Err.Clear: t = ""
-        End If
-        If Len(t) = 0 Then t = "(все)"
-        If LCase$(t) <> "(все)" And LCase$(t) <> "(all)" Then
-            If Len(s) > 0 Then s = s & ";   "
-            s = s & „истое»м€(pf.Caption) & ": " & „истое»м€(t)
-        End If
+        t = "": им€ = "": rr = 0
+        rr = pf.LabelRange.Row
+        им€ = Trim$(¬—троку(pf.LabelRange.Value))
+        If Len(им€) = 0 Then им€ = „истое»м€(pf.Caption)
+        t = Trim$(pf.LabelRange.Offset(0, 1).Text)
+        If Len(t) = 0 Then t = Trim$(„истое»м€(pf.CurrentPageName))
+        Err.Clear
+        Select Case LCase$(t)
+            Case "", "all", "(all)", "(все)", "все"
+            Case Else
+                n = n + 1
+                стр(n) = rr
+                txt(n) = им€ & ": " & t
+        End Select
     Next pf
     On Error GoTo 0
+    ' в том пор€дке, в каком фильтры сто€т на листе
+    For i = 2 To n
+        For j = i To 2 Step -1
+            If стр(j) < стр(j - 1) Then
+                rr = стр(j): стр(j) = стр(j - 1): стр(j - 1) = rr
+                tt = txt(j): txt(j) = txt(j - 1): txt(j - 1) = tt
+            End If
+        Next j
+    Next i
+    For i = 1 To n
+        If i > 1 Then s = s & ";   "
+        s = s & txt(i)
+    Next i
     “екст‘ильтров = s
 End Function
 
-Private Function ¬ыбранќдин(pf As PivotField, ByRef t As String) As Boolean
-    Dim it As PivotItem, n As Long, всего As Long
-    On Error GoTo Ќет
-    For Each it In pf.PivotItems
-        всего = всего + 1
-        If it.Visible Then n = n + 1: t = it.Caption
-    Next it
-    If n = всего Then t = "": ¬ыбранќдин = True: Exit Function   ' выбраны все
-    ¬ыбранќдин = (n = 1)
-    If Not ¬ыбранќдин Then t = ""
-    Exit Function
-Ќет:
-    t = ""
-End Function
-
-
 '--------------------------------------------------------------------------
-'  —толбцы: сн€тие оси столбцов
+'  —толбцы: шапка Ч с листа, тип столбца Ч из оси сводной
 '--------------------------------------------------------------------------
+' ѕодписи шапки берутс€ ровно такими, как они видны в сводной (с учЄтом
+' переименований): у сводных на модели данных объектна€ модель отдаЄт
+' подписи элементов пустыми или исходными. “ип столбца (обычный / итог /
+' промежуточный итог) надЄжно знает ось сводной Ч его берЄм оттуда.
 Private Sub —н€ть—толбцы(pt As PivotTable)
 
-    Dim ax As Object, ln As Object
-    Dim j As Long, k As Long, ok As Boolean, maxLev As Long, d As String
+    Dim ax As Object, j As Long, r As Long, ok As Boolean, ct As Long, i As Long
+    Dim cr As Range, db As Range, ws As Worksheet, верх As Long, cel As Range
+    Dim сл As String
 
     ReDim cType(1 To nC)
     ReDim cCnt(1 To nC)
     ReDim cDF(1 To nC)
+    ReDim inCLT(1 To nC)
     cMeasLev = 0
 
     nMeas = 0
@@ -942,80 +934,64 @@ Private Sub —н€ть—толбцы(pt As PivotTable)
     Err.Clear
     On Error GoTo 0
 
+    ' тип каждого столбца Ч из оси
     ok = False
     On Error Resume Next
     Set ax = pt.PivotColumnAxis
     If Not ax Is Nothing Then ok = (ax.PivotLines.Count = nC)
-    Err.Clear
-    On Error GoTo 0
-
-    If Not ok Then
-        —н€ть—толбцыѕоЋисту pt
-        Exit Sub
-    End If
-
-    maxLev = 1
-    On Error Resume Next
     For j = 1 To nC
-        cType(j) = ax.PivotLines(j).LineType
-        cCnt(j) = ax.PivotLines(j).PivotLineCells.Count
-        If cCnt(j) < 1 Then cCnt(j) = 1
-        If cCnt(j) > maxLev Then maxLev = cCnt(j)
+        inCLT(j) = -1
+        If ok Then
+            inCLT(j) = ax.PivotLines(j).LineType
+            If Err.Number <> 0 Then inCLT(j) = -1: Err.Clear
+        End If
     Next j
     Err.Clear
     On Error GoTo 0
 
-    ReDim cItem(1 To nC, 1 To maxLev)
+    ' строки шапки над областью значений
+    Set db = pt.DataBodyRange
+    Set ws = db.Worksheet
     On Error Resume Next
-    For j = 1 To nC
-        Set ln = ax.PivotLines(j)
-        For k = 1 To cCnt(j)
-            cItem(j, k) = “екстЁлемента(ln, k)
-            d = ""
-            d = »м€ћеры(ln.PivotLineCells(k).DataField)
-            If Err.Number <> 0 Then d = "": Err.Clear
-            If Len(d) > 0 Then
-                cDF(j) = d
-                ' уровень мер определ€ем только по полноразмерным лини€м
-                If cCnt(j) = maxLev And cMeasLev = 0 Then cMeasLev = k
+    Set cr = pt.ColumnRange
+    On Error GoTo 0
+    If cr Is Nothing Then верх = db.Row - 1 Else верх = cr.Row
+    If верх >= db.Row Then верх = db.Row - 1
+    If верх < 1 Then верх = 1
+    nHR = db.Row - верх
+    If nHR < 1 Then nHR = 1
+    ReDim hTxt(1 To nHR, 1 To nC)
+    ReDim hCT(1 To nHR, 1 To nC)
+    For r = 1 To nHR
+        For j = 1 To nC
+            hCT(r, j) = -1
+            If верх + r - 1 < db.Row Then
+                Set cel = ws.Cells(верх + r - 1, db.Column + j - 1)
+                hTxt(r, j) = Trim$(¬—троку(cel.Value))
+                ct = -1
+                On Error Resume Next
+                ct = cel.PivotCell.PivotCellType
+                If Err.Number <> 0 Then ct = -1: Err.Clear
+                On Error GoTo 0
+                hCT(r, j) = ct
             End If
-        Next k
-    Next j
+        Next j
+    Next r
+
+    ' надписи, которые уровнем шапки не €вл€ютс€: названи€ полей и Ђ«начени€ї
+    сл = "|названи€ столбцов|column labels|значени€|values|"
+    On Error Resume Next
+    сл = сл & LCase$(pt.DataPivotField.Caption) & "|"
+    For i = 1 To pt.ColumnFields.Count
+        сл = сл & LCase$(pt.ColumnFields(i).Caption) & "|"
+    Next i
     Err.Clear
     On Error GoTo 0
+    m—лужебные = сл
+
+    ЎапкаѕоЋисту
 
 End Sub
-
-' ѕодпись элемента оси Ч как она показана в сводной. Ёлементы и меры
-' можно переименовать пр€мо в сводной: мен€етс€ Caption, а внутреннее им€
-' (Name) остаЄтс€ исходным, поэтому сначала Caption, затем Name (у OLAP это
-' уникальное им€ вида [ginek].[ —— ѕ новый].&[ —] Ч берЄм последние скобки).
-Private Function “екстЁлемента(ln As Object, ByVal k As Long) As String
-    Dim s As String, pc As Object, ct As Long
-    On Error Resume Next
-    Err.Clear
-    Set pc = ln.PivotLineCells(k)
-    ct = -1
-    ct = pc.PivotCellType
-    If ct = CT_DATAFIELD Then
-        s = »м€ћеры(pc.DataField)
-        If Err.Number <> 0 Then s = "": Err.Clear
-        If Len(s) = 0 Then
-            s = Trim$(¬—троку(pc.Range.Cells(1, 1).Value))
-            If Err.Number <> 0 Then s = "": Err.Clear
-        End If
-    End If
-    If Len(s) = 0 Then
-        s = pc.PivotItem.Caption
-        If Err.Number <> 0 Then Err.Clear: s = ""
-    End If
-    If Len(s) = 0 Then
-        s = pc.PivotItem.Name
-        If Err.Number <> 0 Then Err.Clear: s = ""
-    End If
-    On Error GoTo 0
-    “екстЁлемента = „истое»м€(s)
-End Function
 
 ' Ќазвание меры, как оно показано в сводной (с учЄтом переименовани€)
 Private Function »м€ћеры(df As Object) As String
@@ -1027,119 +1003,6 @@ Private Function »м€ћеры(df As Object) As String
     On Error GoTo 0
     »м€ћеры = „истое»м€(s)
 End Function
-
-' «апасной разбор шапки Ч по тексту и типам €чеек на листе.
-' ѕодпись группы стоит только над первым столбцом группы, поэтому пуста€
-' клетка наследует подпись слева; итог Ђ—евер »тогї относитс€ к группе
-' Ђ—еверї, котора€ стоит пр€мо перед ним.
-Private Sub —н€ть—толбцыѕоЋисту(pt As PivotTable)
-
-    Dim cr As Range, db As Range, j As Long, k As Long, r As Long, s As String
-    Dim строк As Long, верх As Long, ct As Long
-    Dim стек() As String, послЌепуст As Long, база As String
-    Dim нужна() As Boolean, t As Long, сырые() As String, типы() As Long, q As Long
-
-    On Error Resume Next
-    Set cr = pt.ColumnRange
-    Set db = pt.DataBodyRange
-    On Error GoTo 0
-    If cr Is Nothing Then
-        ReDim cItem(1 To nC, 1 To 1)
-        For j = 1 To nC
-            cItem(j, 1) = mMeas(1)
-            If nMeas > 1 And j <= nMeas Then cItem(j, 1) = mMeas(j)
-            cCnt(j) = 1
-            cType(j) = LT_REGULAR
-        Next j
-        Exit Sub
-    End If
-
-    верх = cr.Row
-    строк = db.Row - верх
-    If строк < 1 Then строк = 1: верх = db.Row - 1
-    ReDim сырые(1 To строк, 1 To nC)
-    ReDim типы(1 To строк, 1 To nC)
-    ReDim нужна(1 To строк)
-
-    ' строки шапки, где только кнопки полей и надписи ЂЌазвани€ столбцовї,
-    ' уровн€ не задают Ч выкидываем
-    For r = 1 To строк
-        For j = 1 To nC
-            сырые(r, j) = ¬—троку(db.Worksheet.Cells(верх + r - 1, db.Column + j - 1).Value)
-            ct = -1
-            On Error Resume Next
-            ct = db.Worksheet.Cells(верх + r - 1, db.Column + j - 1).PivotCell.PivotCellType
-            If Err.Number <> 0 Then ct = -1: Err.Clear
-            On Error GoTo 0
-            типы(r, j) = ct
-            If ct = CT_ITEM Or ct = CT_SUBTOTAL Or ct = CT_GRAND Or ct = CT_DATAFIELD _
-               Or ct = CT_CUSTOMSUB Then нужна(r) = True
-            If ct = -1 And Len(Trim$(сырые(r, j))) > 0 Then нужна(r) = True
-        Next j
-    Next r
-    t = 0
-    For r = 1 To строк
-        If нужна(r) Then t = t + 1
-    Next r
-    If t = 0 Then t = 1: нужна(строк) = True
-
-    ReDim cItem(1 To nC, 1 To t)
-    ReDim стек(1 To t)
-    For j = 1 To nC
-        cType(j) = LT_REGULAR
-        k = 0
-        послЌепуст = 0
-        For r = 1 To строк
-            If нужна(r) Then
-                k = k + 1
-                s = сырые(r, j)
-                ct = типы(r, j)
-                If ct = CT_GRAND Then cType(j) = LT_GRAND
-                If ct = CT_SUBTOTAL Or ct = CT_CUSTOMSUB Then cType(j) = LT_SUBTOTAL
-                If ct = -1 Then
-                    If Ётоќбщий»тог(s) Then
-                        cType(j) = LT_GRAND
-                    ElseIf Len(—уффикс»тога(s)) > 0 Then
-                        cType(j) = LT_SUBTOTAL
-                    End If
-                End If
-                If Len(Trim$(s)) > 0 Then послЌепуст = k
-                If cType(j) <> LT_REGULAR And Len(Trim$(s)) > 0 Then Exit For
-                If Len(Trim$(s)) > 0 Then
-                    стек(k) = s
-                    For q = k + 1 To t
-                        стек(q) = ""
-                    Next q
-                End If
-                cItem(j, k) = стек(k)
-            End If
-        Next r
-        If cType(j) = LT_SUBTOTAL Then
-            ' путь итога Ч это подписи его группы
-            база = —уффикс»тога(s)
-            If Len(база) = 0 Then база = стек(k)
-            For q = 1 To k - 1
-                cItem(j, q) = стек(q)
-            Next q
-            cItem(j, k) = база
-            cCnt(j) = k
-        ElseIf cType(j) = LT_GRAND Then
-            cItem(j, 1) = “екстќбщего»тога()
-            cCnt(j) = 1
-        Else
-            cCnt(j) = послЌепуст
-            If cCnt(j) < 1 Then cCnt(j) = 1
-            For q = 1 To cCnt(j)
-                cItem(j, q) = стек(q)
-            Next q
-        End If
-        ' мера столбца Ч если в подписи есть еЄ им€
-        For q = 1 To nMeas
-            If Len(mMeas(q)) > 0 And InStr(1, s, mMeas(q), vbTextCompare) > 0 Then cDF(j) = mMeas(q)
-        Next q
-    Next j
-
-End Sub
 
 
 '==========================================================================
@@ -1170,7 +1033,7 @@ End Function
 '  Ќе обращаетс€ к Excel Ч работает только с массивами in*, поэтому
 '  одинаково ведЄт себ€ на любом макете и провер€етс€ автотестами.
 '==========================================================================
-Public Sub ядро—троки()
+Private Sub ядро—троки()
 
     Dim i As Long, k As Long, q As Long, lv As Long, глуб As Long
     Dim посл As Long, s As String, база As String, преж√луб As Long
@@ -1211,7 +1074,15 @@ Public Sub ядро—троки()
             ' —трока без подписи Ч пустой элемент. ”ровень знает сводна€;
             ' если нет Ч это ребЄнок предыдущей строки (в табличном макете
             ' предыдуща€ строка уже на самом глубоком уровне).
-            lv = ѕустой”ровень(i)
+            lv = 0
+            If mѕоѕол€м Then
+                lv = ѕустой”ровень(i)
+            ElseIf nLbl = 1 Then
+                ' сжатый макет: у пустого элемента тот же отступ, что у соседей
+                For q = 1 To mMaxD
+                    If m—лот(q) = 1000 + ћин(ћакс(inInd(i, 1), 0), 999) Then lv = q: Exit For
+                Next q
+            End If
             If lv = 0 Then lv = преж√луб + 1
             If lv > mMaxD Then lv = mMaxD
             If lv < 1 Then lv = 1
@@ -1227,23 +1098,35 @@ Public Sub ядро—троки()
                 If lv > 0 Then
                     s = inTxt(i, k)
                     If k = посл And mType(i) = LT_SUBTOTAL Then
-                        ' Ђ—евер »тогї Ч итог группы Ђ—еверї, котора€ только
-                        ' что закончилась (или начнЄтс€, если итоги вверху)
+                        ' —трока-итог бывает двух видов:
+                        '  * итоги внизу: Ђ—евер »тогї после детей Ч группа
+                        '    Ђ—еверї уже в стеке, им€ берЄм из подписи без Ђ»тогї;
+                        '  * итоги вверху: строка родител€ Ђ—еверї сама €вл€етс€
+                        '    итогом (Excel так еЄ и помечает) Ч подпись и есть им€
+                        '    Ќќ¬ќ… группы, старое им€ из стека брать нельз€.
+                        ' ѕользовательские итоги (Ђ—евер —уммаї) относ€тс€
+                        ' к группе в стеке.
                         база = —уффикс»тога(s)
-                        If Len(база) > 0 Then
-                            If StrComp(база, стек(lv), vbTextCompare) <> 0 Then
-                                стек(lv) = база: стекR(lv) = 0: стекC(lv) = 0
-                            End If
-                        ElseIf Len(стек(lv)) = 0 Then
+                        If inCT(i, k) = CT_CUSTOMSUB Then
+                            mOwnCustom(i) = True
+                            If Len(стек(lv)) = 0 Then стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        ElseIf Len(база) > 0 And StrComp(база, стек(lv), vbTextCompare) = 0 Then
+                            ' итог внизу: группа та же, что в стеке
+                        Else
                             стек(lv) = s: стекR(lv) = i: стекC(lv) = k
                         End If
-                        If inCT(i, k) = CT_CUSTOMSUB Then mOwnCustom(i) = True
-                    Else
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
+                    ElseIf StrComp(s, стек(lv), vbTextCompare) <> 0 Or k = посл Then
+                        ' Ќова€ подпись уровн€ Ч нижние уровни начинаютс€ заново.
+                        ' ѕовтор той же подписи предка (табличный макет с
+                        ' Ђповтор€ть подписиї) группу не мен€ет и детей не сбрасывает.
                         стек(lv) = s: стекR(lv) = i: стекC(lv) = k
+                        For q = lv + 1 To mMaxD
+                            стек(q) = "": стекR(q) = 0: стекC(q) = 0
+                        Next q
                     End If
-                    For q = lv + 1 To mMaxD
-                        стек(q) = "": стекR(q) = 0: стекC(q) = 0
-                    Next q
                     If lv > глуб Then глуб = lv
                 End If
             Next k
@@ -1309,19 +1192,19 @@ Private Function “ип—троки(ByVal i As Long) As Long
     “ип—троки = t
 End Function
 
-Public Function Ётоќбщий»тог(ByVal s As String) As Boolean
+Private Function Ётоќбщий»тог(ByVal s As String) As Boolean
     s = LCase$(Trim$(s))
     Ётоќбщий»тог = (s = "общий итог" Or s = "grand total" Or s = LCase$(TXT_GRAND) _
                     Or s = LCase$(Trim$(mGrandTxt)))
 End Function
 
 ' ѕодпись общего итога: переименованна€ в сводной, иначе стандартна€
-Public Function “екстќбщего»тога() As String
+Private Function “екстќбщего»тога() As String
     If Len(Trim$(mGrandTxt)) > 0 Then “екстќбщего»тога = mGrandTxt Else “екстќбщего»тога = TXT_GRAND
 End Function
 
 ' Ђ—евер »тогї -> Ђ—еверї; не итог -> ""
-Public Function —уффикс»тога(ByVal s As String) As String
+Private Function —уффикс»тога(ByVal s As String) As String
     Dim t As String, x As Variant
     t = Trim$(s)
     For Each x In Array(" итог", " total", " всего", " итого")
@@ -1335,33 +1218,55 @@ Public Function —уффикс»тога(ByVal s As String) As String
 End Function
 
 ' ”ровень каждой €чейки подписей.
-' ≈сли сводна€ сказала, к какому полю относитс€ кажда€ непуста€ €чейка, Ч
-' уровень = пор€дковый номер пол€. »наче уровень задаЄт место на листе:
-' столбец, а внутри столбца Ч отступ (сжатый макет держит несколько полей
-' в одном столбце и различает их только отступом).
+' √лавный признак Ч место на листе, которое видно глазами: столбец, а внутри
+' столбца Ч отступ (сжатый макет держит несколько полей в одном столбце и
+' различает их только отступом). “ак уровни определ€ютс€ одинаково в любом
+' макете и на модели данных, где сведени€ о пол€х от сводной ненадЄжны.
+' —ведени€ о пол€х берутс€ только когда место неоднозначно: в одном столбце
+' с одним отступом сто€т разные пол€ (сжатый макет с нулевым отступом).
 Private Sub ѕостроить”ровни()
 
-    Dim i As Long, k As Long, j As Long, n As Long, v As Long
-    Dim поѕол€м As Boolean, есть As Boolean
+    Dim i As Long, k As Long, j As Long, n As Long, v As Long, a As Long, м As Long
+    Dim поѕол€м As Boolean
     Dim знач() As Long, сыр() As Long
+    Dim место() As Long, поле() As Long, nм As Long
 
     ReDim mCellLev(1 To nR, 1 To nLbl)
     ReDim сыр(1 To nR, 1 To nLbl)
 
-    ƒозаполнить”ровни
-
-    поѕол€м = True
+    ' есть ли место, где сводна€ называет два разных пол€
+    ReDim место(1 To nR * nLbl + 1)
+    ReDim поле(1 To nR * nLbl + 1)
+    поѕол€м = False
     For i = 1 To nR
         If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
             For k = 1 To nLbl
-                If Len(Trim$(inTxt(i, k))) > 0 Then
-                    есть = True
-                    If inLev(i, k) <= 0 Then поѕол€м = False
+                If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) > 0 Then
+                    м = k * 1000 + ћин(ћакс(inInd(i, k), 0), 999)
+                    For a = 1 To nм
+                        If место(a) = м Then Exit For
+                    Next a
+                    If a > nм Then
+                        nм = nм + 1: место(nм) = м: поле(nм) = inLev(i, k)
+                    ElseIf поле(a) <> inLev(i, k) Then
+                        поѕол€м = True
+                    End If
                 End If
             Next k
         End If
     Next i
-    If Not есть Then поѕол€м = False
+
+    ' по пол€м Ч только если сводна€ знает поле каждой непустой подписи
+    If поѕол€м Then
+        ƒозаполнить”ровни
+        For i = 1 To nR
+            If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
+                For k = 1 To nLbl
+                    If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) <= 0 Then поѕол€м = False
+                Next k
+            End If
+        Next i
+    End If
 
     ' сырые координаты и их различные значени€ по возрастанию
     ReDim знач(1 To nR * nLbl + 1)
@@ -1371,7 +1276,7 @@ Private Sub ѕостроить”ровни()
             For k = 1 To nLbl
                 If Len(Trim$(inTxt(i, k))) > 0 Then
                     If поѕол€м Then
-                        v = inLev(i, k)
+                        v = k * 1000 + ћин(inLev(i, k), 999)
                     Else
                         v = k * 1000 + ћин(ћакс(inInd(i, k), 0), 999)
                     End If
@@ -1382,6 +1287,11 @@ Private Sub ѕостроить”ровни()
         End If
     Next i
     If n = 0 Then n = 1: знач(1) = 1000
+    mѕоѕол€м = поѕол€м
+    ReDim m—лот(1 To n)
+    For j = 1 To n
+        m—лот(j) = знач(j)
+    Next j
 
     mMaxD = n
     ReDim mColOf(1 To mMaxD)
@@ -1420,7 +1330,7 @@ End Sub
 ' ячейка, о которой сводна€ не сказала поле (бывает у итогов и на модели
 ' данных), получает уровень по месту на листе Ч если на этом месте
 ' (столбец + отступ) у остальных €чеек встречаетс€ ровно одно поле.
-Public Sub ƒозаполнить”ровни()
+Private Sub ƒозаполнить”ровни()
     Dim i As Long, k As Long, a As Long, n As Long, м As Long
     Dim место() As Long, ур() As Long, дво€ко() As Boolean
     ReDim место(1 To nR * nLbl + 1)
@@ -1528,7 +1438,7 @@ End Sub
 '  над своими детьми, общий итог Ч первой строкой. —ортировка устойчива€:
 '  внутри группы строки не перемешиваютс€.
 '==========================================================================
-Public Sub ѕор€док—трок()
+Private Sub ѕор€док—трок()
 
     Dim i As Long, k As Long, n As Long, r As Long, m As Long, a As Long
     Dim idx() As Long, ключ() As String, s As String
@@ -1644,7 +1554,7 @@ End Sub
 
 ' ѕосле упор€дочивани€: кто кому родитель, какие подписи показывать,
 ' уровень группировки строк.
-Public Sub ядроѕослеѕор€дка()
+Private Sub ядроѕослеѕор€дка()
 
     Dim p As Long, i As Long, k As Long, d As Long, q As Long, c As Long
     Dim свой() As String, пред As Long, приставка As Long, лв As Long
@@ -1683,7 +1593,14 @@ Public Sub ядроѕослеѕор€дка()
             For k = 1 To mMaxD
                 свой(k) = ""
             Next k
-            mOutLbl(p, 1) = “екстќбщего»тога()
+            ' подпись Ч как в сводной: при нескольких мерах в строках итогов
+            ' несколько (Ђ»тог —умма выручкиї, Ђ»тог  оличествої)
+            txt = ""
+            For k = 1 To nLbl
+                If Len(Trim$(inTxt(i, k))) > 0 Then txt = inTxt(i, k): Exit For
+            Next k
+            If Len(txt) = 0 Then txt = “екстќбщего»тога()
+            mOutLbl(p, 1) = txt
             mOutLvl(p) = 1
             пред = 0
             GoTo —лед
@@ -1769,86 +1686,233 @@ End Function
 
 
 '==========================================================================
+'  яƒ–ќ: Ўјѕ ј —“ќЋЅ÷ќ¬ ѕќ Ћ»—“”
+'  ¬ход: hTxt/hCT (строки шапки над значени€ми), inCLT (тип столбца из оси),
+'  m—лужебные, mMeas. ¬ыход: cItem/cCnt/cType/cDF/cMeasLev.
+'  ѕодпись группы стоит только над первым столбцом группы Ч пуста€ клетка
+'  верхних строк наследует подпись слева. ¬ самой нижней строке шапки
+'  наследовани€ нет: пуста€ клетка там Ч пустой элемент, а не продолжение.
+'==========================================================================
+Private Sub ЎапкаѕоЋисту()
+
+    Dim r As Long, j As Long, k As Long, q As Long, t As Long, ct As Long
+    Dim нужна() As Boolean, ур() As Long, стек() As String, s As String
+    Dim typ As Long, итогЌа As Long, база As String, лучш As Long, n As Long, m As Long
+
+    ReDim нужна(1 To nHR)
+    For r = 1 To nHR
+        For j = 1 To nC
+            ct = hCT(r, j)
+            If ct = CT_ITEM Or ct = CT_SUBTOTAL Or ct = CT_GRAND Or ct = CT_DATAFIELD Or ct = CT_CUSTOMSUB Then
+                нужна(r) = True
+            ElseIf ct = -1 And Len(hTxt(r, j)) > 0 And Not —лужебна€(hTxt(r, j)) Then
+                нужна(r) = True
+            End If
+        Next j
+    Next r
+    t = 0
+    ReDim ур(1 To nHR)
+    For r = 1 To nHR
+        If нужна(r) Then t = t + 1: ур(t) = r
+    Next r
+    If t = 0 Then t = 1: ур(1) = nHR
+
+    ReDim cItem(1 To nC, 1 To t)
+    ReDim стек(1 To t)
+    ReDim cCnt(1 To nC)
+    ReDim cType(1 To nC)
+    ReDim cDF(1 To nC)
+
+    ' уровень мер Ч строка, где больше всего подписей совпадает с мерами
+    cMeasLev = 0: лучш = 0
+    For k = 1 To t
+        n = 0
+        For j = 1 To nC
+            If Len(ћераѕо“ексту(hTxt(ур(k), j), True)) > 0 Then n = n + 1
+        Next j
+        If n > лучш Then лучш = n: cMeasLev = k
+    Next k
+
+    For j = 1 To nC
+        ' тип столбца: ось, иначе тип €чейки, иначе текст
+        typ = inCLT(j)
+        If typ < 0 Then
+            typ = LT_REGULAR
+            For k = 1 To t
+                ct = hCT(ур(k), j)
+                s = hTxt(ур(k), j)
+                If ct = CT_GRAND Then typ = LT_GRAND
+                If (ct = CT_SUBTOTAL Or ct = CT_CUSTOMSUB) And typ <> LT_GRAND Then typ = LT_SUBTOTAL
+                If ct = -1 And Len(s) > 0 Then
+                    If Ётоќбщий»тог(s) Or Left$(LCase$(s), 5) = "итог " Or Left$(LCase$(s), 6) = "total " Then
+                        typ = LT_GRAND
+                    ElseIf Len(—уффикс»тога(s)) > 0 And typ <> LT_GRAND Then
+                        typ = LT_SUBTOTAL
+                    End If
+                End If
+            Next k
+        End If
+        If typ = LT_BLANK Then typ = LT_REGULAR
+        cType(j) = typ
+
+        ' клетка с подписью итога Ч сама€ нижн€€ непуста€
+        итогЌа = 0
+        If typ <> LT_REGULAR Then
+            For k = t To 1 Step -1
+                If Len(hTxt(ур(k), j)) > 0 And Not —лужебна€(hTxt(ур(k), j)) Then итогЌа = k: Exit For
+            Next k
+            If итогЌа = 0 Then итогЌа = 1
+        End If
+
+        For k = 1 To t
+            s = hTxt(ур(k), j)
+            If —лужебна€(s) Then s = ""
+            If typ <> LT_REGULAR And k = итогЌа Then
+                ' итог: путь Ч подписи групп над ним, сам уровень Ч им€ группы
+                For q = 1 To k - 1
+                    cItem(j, q) = стек(q)
+                Next q
+                If typ = LT_SUBTOTAL Then
+                    база = —уффикс»тога(s)
+                    If Len(база) = 0 Then база = стек(k)
+                    If Len(база) = 0 Then база = s
+                    cItem(j, k) = база
+                Else
+                    cItem(j, k) = s
+                End If
+                cCnt(j) = k
+                Exit For
+            End If
+            If Len(s) > 0 Then
+                стек(k) = s
+                For q = k + 1 To t
+                    стек(q) = ""
+                Next q
+            ElseIf k = t Then
+                стек(k) = ""            ' пустой элемент на нижнем уровне
+            End If
+            cItem(j, k) = стек(k)
+        Next k
+        If typ = LT_REGULAR Then cCnt(j) = t
+
+        ' мера столбца
+        If cMeasLev > 0 And cMeasLev <= cCnt(j) Then cDF(j) = ћераѕо“ексту(cItem(j, cMeasLev), True)
+        If Len(cDF(j)) = 0 Then
+            For k = 1 To t
+                If Len(hTxt(ур(k), j)) > 0 Then
+                    m = 0
+                    cDF(j) = ћераѕо“ексту(hTxt(ур(k), j), False)
+                    If Len(cDF(j)) > 0 Then Exit For
+                End If
+            Next k
+        End If
+    Next j
+
+End Sub
+
+Private Function —лужебна€(ByVal s As String) As Boolean
+    If Len(s) = 0 Then Exit Function
+    —лужебна€ = (InStr(1, m—лужебные, "|" & LCase$(Trim$(s)) & "|", vbBinaryCompare) > 0)
+End Function
+
+' ћера, названна€ в тексте: точно = подпись равна имени меры,
+' иначе Ч им€ меры входит в подпись (Ђ»тог дельта суммыї); берЄм самое длинное
+Private Function ћераѕо“ексту(ByVal s As String, ByVal точно As Boolean) As String
+    Dim q As Long, лучш As String
+    s = Trim$(s)
+    If Len(s) = 0 Then Exit Function
+    For q = 1 To nMeas
+        If Len(mMeas(q)) > 0 Then
+            If точно Then
+                If StrComp(s, mMeas(q), vbTextCompare) = 0 Then ћераѕо“ексту = mMeas(q): Exit Function
+            ElseIf InStr(1, s, mMeas(q), vbTextCompare) > 0 Then
+                If Len(mMeas(q)) > Len(лучш) Then лучш = mMeas(q)
+            End If
+        End If
+    Next q
+    If Not точно Then ћераѕо“ексту = лучш
+End Function
+
+
+'==========================================================================
 '  яƒ–ќ: Ўјѕ ј —“ќЋЅ÷ќ¬
 '  ¬ход: cItem/cCnt/cType/cDF/cMeasLev/mMeas. ¬ыход: dLev/dDepth/nLev.
 '==========================================================================
-Public Sub —обратьЎапку()
+Private Sub —обратьЎапку()
 
-    Dim j As Long, k As Long, maxLev As Long
-    Dim мера() As String, выносить As Boolean
-    Dim пор() As Long, np As Long, сдвиг As Long, задано As Long
+    Dim j As Long, k As Long, maxLev As Long, L As Long
+    Dim мера() As String
     Dim счЄт As Long, пусто As Boolean
 
     maxLev = 1
     For j = 1 To nC
         If cCnt(j) > maxLev Then maxLev = cCnt(j)
     Next j
-    If UBound(cItem, 2) < maxLev Then maxLev = UBound(cItem, 2)
+    If UBound(cItem, 2) > maxLev Then maxLev = UBound(cItem, 2)
 
     ¬осстановитьѕуть»тогов cItem, cCnt, cType, nC, maxLev
 
-    выносить = (cMeasLev > 0 And nMeas > 1)
-
-    ' --- мера дл€ каждого столбца ---
+    ' --- мера каждого столбца (нужна столбцам итогов) ---
     ReDim мера(1 To nC)
-    If выносить Then
-        счЄт = 0
-        For j = 1 To nC
-            If cType(j) = LT_SUBTOTAL Or (cType(j) = LT_GRAND And Len(cDF(j)) = 0) Then
-                ' Excel выдаЄт по одному столбцу итога на каждую меру подр€д,
-                ' в пор€дке мер Ч по позиции в серии и определ€ем меру
-                If j > 1 Then
-                    If cType(j - 1) = cType(j) And ќдин люч(cItem, cCnt, j - 1, j) Then
-                        счЄт = счЄт + 1
-                    Else
-                        счЄт = 1
-                    End If
+    счЄт = 0
+    For j = 1 To nC
+        If Len(cDF(j)) > 0 Then
+            мера(j) = cDF(j)
+        ElseIf cType(j) <> LT_REGULAR And nMeas > 1 Then
+            ' Excel выдаЄт по одному столбцу итога на каждую меру подр€д,
+            ' в пор€дке мер Ч по позиции в серии и определ€ем меру
+            If j > 1 Then
+                If cType(j - 1) = cType(j) And ќдин люч(cItem, cCnt, j - 1, j) Then
+                    счЄт = счЄт + 1
                 Else
                     счЄт = 1
                 End If
-                If счЄт >= 1 And счЄт <= nMeas Then мера(j) = mMeas(счЄт)
-            ElseIf Len(cDF(j)) > 0 Then
-                мера(j) = cDF(j)
-            ElseIf cMeasLev <= cCnt(j) Then
-                мера(j) = cItem(j, cMeasLev)
+            Else
+                счЄт = 1
             End If
-        Next j
-    End If
+            If счЄт >= 1 And счЄт <= nMeas Then мера(j) = mMeas(счЄт)
+        ElseIf cMeasLev > 0 And cMeasLev <= cCnt(j) Then
+            мера(j) = cItem(j, cMeasLev)
+        End If
+    Next j
 
-    ' --- уровни в пор€дке вывода: мера Ч вперЄд ---
-    ReDim пор(1 To maxLev)
-    np = 0
-    For k = 1 To maxLev
-        If Not (выносить And k = cMeasLev) Then np = np + 1: пор(np) = k
-    Next k
-
-    If выносить Then nLev = np + 1 Else nLev = np
-    If nLev < 1 Then nLev = 1
-    If выносить Then сдвиг = 1 Else сдвиг = 0
-
+    ' --- уровни шапки Ч в том же пор€дке, что в сводной ---
+    ' (меры остаютс€ на своЄм месте: сверху, если в сводной Ђ«начени€ї
+    ' сто€т первыми, или под элементами, если поле стоит выше Ђ«наченийї)
+    nLev = maxLev
     ReDim dLev(1 To nC, 1 To nLev)
     ReDim dDepth(1 To nC)
 
     For j = 1 To nC
-        If выносить Then dLev(j, 1) = мера(j)
-        If cType(j) = LT_GRAND Then
-            dDepth(j) = сдвиг + 1
-            If сдвиг + 1 <= nLev Then dLev(j, сдвиг + 1) = “екстќбщего»тога()
-        Else
-            ' сколько Ђнасто€щихї уровней у столбца (без уровн€ меры)
-            задано = 0
-            For k = 1 To np
-                If пор(k) <= cCnt(j) Then
-                    dLev(j, сдвиг + k) = cItem(j, пор(k))
-                    задано = k
-                End If
+        L = cCnt(j)
+        If L < 1 Then L = 1
+        If L > nLev Then L = nLev
+        If cType(j) = LT_REGULAR Then
+            For k = 1 To L
+                dLev(j, k) = cItem(j, k)
             Next k
-            dDepth(j) = сдвиг + задано
-            If dDepth(j) < 1 Then dDepth(j) = 1
-            If cType(j) = LT_SUBTOTAL And сдвиг + задано < nLev Then
-                dLev(j, сдвиг + задано + 1) = TXT_SUBTOT
+        Else
+            ' итог: подписи групп над ним, сам он Ч на своЄм уровне
+            For k = 1 To L - 1
+                dLev(j, k) = cItem(j, k)
+            Next k
+            If L = cMeasLev And Len(мера(j)) > 0 Then
+                ' подпись итога стоит в строке мер: мера Ч на еЄ уровне,
+                ' пометка итога Ч уровнем ниже
+                dLev(j, L) = мера(j)
+                If L + 1 <= nLev Then
+                    If cType(j) = LT_GRAND Then dLev(j, L + 1) = “екстќбщего»тога() Else dLev(j, L + 1) = TXT_SUBTOT
+                End If
+            ElseIf cType(j) = LT_GRAND Then
+                dLev(j, L) = “екстќбщего»тога()
+            Else
+                dLev(j, L) = cItem(j, L)
+                If L + 1 <= nLev And L + 1 <> cMeasLev Then dLev(j, L + 1) = TXT_SUBTOT
             End If
+            ' мера итога Ч на уровне мер, если он ниже
+            If cMeasLev > L And cMeasLev <= nLev And Len(мера(j)) > 0 Then dLev(j, cMeasLev) = мера(j)
         End If
+        dDepth(j) = L
     Next j
 
     ”братьѕустые”ровни
@@ -1919,7 +1983,7 @@ End Sub
 ' итог оказываетс€ в отдельной группе и уезжает вправо. ¬осстанавливаем путь
 ' по ЅЋ»∆ј…Ў≈… обычной линии с этим элементом: итог стоит вплотную к своей
 ' группе, а одноимЄнные элементы других родителей Ч дальше.
-Public Sub ¬осстановитьѕуть»тогов(ByRef item() As String, ByRef cnt() As Long, _
+Private Sub ¬осстановитьѕуть»тогов(ByRef item() As String, ByRef cnt() As Long, _
                                   ByRef тип() As Long, ByVal n As Long, ByVal maxLev As Long)
     Dim j As Long, q As Long, k As Long, шаг As Long
     Dim посл As String, строка As Long, уровень As Long
@@ -1991,7 +2055,7 @@ End Function
 '==========================================================================
 '  яƒ–ќ: ѕќ–яƒќ  —“ќЋЅ÷ќ¬ Ч итог группы левее еЄ столбцов
 '==========================================================================
-Public Sub ѕор€док—толбцов()
+Private Sub ѕор€док—толбцов()
     Dim j As Long, ост() As Long, n As Long
     ReDim cOrd(1 To nC)
     nCOrd = 0
@@ -2077,6 +2141,83 @@ Private Function “олько»тог(ByRef idx() As Long, ByVal n As Long, _
         End If
     Next i
     “олько»тог = есть
+End Function
+
+' ѕлан объединени€ шапки: пр€моугольники (уровень1, столбец1)-(уровень2, столбец2)
+' в координатах шапки. ѕо горизонтали Ч соседние столбцы с одинаковыми
+' подпис€ми на всех уровн€х до k. ѕо вертикали Ч столбец, у которого нижние
+' уровни пустые (итоги, пустой элемент), но только если его подпись не
+' объединена по горизонтали с сосед€ми: иначе объединени€ пересекутс€,
+' Excel сольЄт их в один блок и сотрЄт подписи нижнего уровн€.
+Private Sub ѕланЎапки()
+
+    Dim k As Long, ci As Long, a As Long, п As Long, кк As Long
+    Dim шир() As Long          ' (уровень, позици€) Ч ширина горизонтального объединени€
+
+    nќбъед = 0
+    ReDim mќб 1(1 To 2 * nLev * nCOrd + 1)
+    ReDim mќб—1(1 To 2 * nLev * nCOrd + 1)
+    ReDim mќб 2(1 To 2 * nLev * nCOrd + 1)
+    ReDim mќб—2(1 To 2 * nLev * nCOrd + 1)
+    ReDim шир(1 To nLev, 1 To nCOrd)
+
+    For k = 1 To nLev
+        ci = 1
+        Do While ci <= nCOrd
+            a = ci
+            Do While ci + 1 <= nCOrd
+                If Not ќдинаковыƒо(cOrd(a), cOrd(ci + 1), k) Then Exit Do
+                If Len(Trim$(dLev(cOrd(a), k))) = 0 Then Exit Do
+                ci = ci + 1
+            Loop
+            For п = a To ci
+                шир(k, п) = ci - a + 1
+            Next п
+            If ci > a Then
+                nќбъед = nќбъед + 1
+                mќб 1(nќбъед) = k: mќб—1(nќбъед) = a
+                mќб 2(nќбъед) = k: mќб—2(nќбъед) = ci
+            End If
+            ci = ci + 1
+        Loop
+    Next k
+
+    For ci = 1 To nCOrd
+        кк = 0
+        For п = nLev To 1 Step -1
+            If Len(Trim$(dLev(cOrd(ci), п))) > 0 Then кк = п: Exit For
+        Next п
+        If кк >= 1 And кк < nLev Then
+            If шир(кк, ci) = 1 Then
+                nќбъед = nќбъед + 1
+                mќб 1(nќбъед) = кк: mќб—1(nќбъед) = ci
+                mќб 2(nќбъед) = nLev: mќб—2(nќбъед) = ci
+            End If
+        End If
+    Next ci
+
+End Sub
+
+Private Function ќдинаковыƒо(ByVal a As Long, ByVal b As Long, ByVal k As Long) As Boolean
+    Dim i As Long
+    For i = 1 To k
+        If StrComp(dLev(a, i), dLev(b, i), vbTextCompare) <> 0 Then Exit Function
+    Next i
+    ќдинаковыƒо = True
+End Function
+
+'  ласс строки дл€ раскраски Ч по ”–ќ¬Ќё, а не по наличию детей:
+' все строки одного уровн€ выгл€д€т одинаково (так в дизайне: итог,
+' уровень 1, 2, 3...). Ќижний уровень сводной Ч детализаци€, без заливки.
+' "G" Ч общий итог, "S<n>" Ч уровень n, "" Ч детализаци€.
+Private Function  ласс—троки(ByVal i As Long) As String
+    If mType(i) = LT_GRAND Then
+         ласс—троки = "G"
+    ElseIf mType(i) = LT_SUBTOTAL Or mDepth(i) < mMaxD Then
+         ласс—троки = "S" & mDepth(i)
+    Else
+         ласс—троки = ""
+    End If
 End Function
 '#яƒ–ќ- ќЌ≈÷
 
@@ -2175,10 +2316,8 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         i = mOrd(ri)
         If mType(i) = LT_GRAND Then
             m ласс—тр(ri) = "G"
-        ElseIf m–одитель(i) Then
-            m ласс—тр(ri) = "S" & mDepth(i)
         Else
-            m ласс—тр(ri) = ""
+            m ласс—тр(ri) =  ласс—троки(i)
         End If
     Next ri
 
@@ -2214,10 +2353,12 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         Next ci
     Next k
     ws.Range(ws.Cells(rHdr, cData), ws.Cells(rNum - 1, cLast)).Value = a
+    ' подписи слева Ч в верхнюю строку шапки: ниже они объедин€ютс€ по высоте,
+    ' а при объединении остаЄтс€ значение верхней клетки
     For k = 1 To nLbl
-        ws.Cells(rNum - 1, cLbl + k - 1).Value = “екстячейки(mLblCap(k))
+        ws.Cells(rHdr, cLbl + k - 1).Value = “екстячейки(mLblCap(k))
     Next k
-    ws.Cells(rNum - 1, 1).Value = "є"
+    ws.Cells(rHdr, 1).Value = "є"
 
     With ws.Range(ws.Cells(rHdr, 1), ws.Cells(rNum - 1, cLast))
         .Font.Bold = True
@@ -2292,7 +2433,7 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         i = mOrd(ri)
         For ci = 1 To nCOrd
             v = vals(i, cOrd(ci))
-            If ѕустое«начение(v) Then a(ri, ci) = "-" Else a(ri, ci) = v
+            If ѕустое«начение(v) Then a(ri, ci) = "Ц" Else a(ri, ci) = v
         Next ci
     Next ri
     Set rng = ws.Range(ws.Cells(rData, cData), ws.Cells(rLast, cLast))
@@ -2347,6 +2488,9 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     Next j
     ws.Rows(rNum).RowHeight = 10
     ws.Rows(4).RowHeight = 6
+    ' строки таблицы Ч чуть выше стандартных, текст по центру по вертикали
+    ws.Range(ws.Rows(rData), ws.Rows(rLast)).RowHeight = 15
+    ws.Range(ws.Cells(rHdr, 1), ws.Cells(rLast, cLast)).VerticalAlignment = xlCenter
 
     ' ---------- группировка строк по уровн€м ----------
     If √–”ѕѕ»–ќ¬ј“№ Then —группировать ws, rData
@@ -2439,9 +2583,9 @@ Private Function јвто‘ормат(ByRef vals() As Variant, ByVal i As Long, ByVal j As
         Next a
     End If
     If дроби Then
-        јвто‘ормат = "#,##0.00;[Red]-#,##0.00;""-"""
+        јвто‘ормат = "#,##0.00;-#,##0.00;""Ц"""
     Else
-        јвто‘ормат = "#,##0;[Red]-#,##0;""-"""
+        јвто‘ормат = "#,##0;-#,##0;""Ц"""
     End If
 End Function
 
@@ -2628,9 +2772,18 @@ Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As L
     нач = 1
     For ri = 2 To n + 1
         If база(ri) <> база(нач) Then
-            With ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Interior
+            ' строка итога заливаетс€ целиком, вместе с номером Ђєї Ч как в дизайне
+            With ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, cLast)).Interior
                 If база(нач) >= 0 Then .Color = база(нач) Else .Pattern = xlNone
             End With
+            ' текст Ч по контрасту с заливкой: на тЄмной белый, на светлой тЄмный
+            ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Font.Color = “екстЌа(база(нач))
+            ' номер Ђєї: серый на белой детализации, на заливке Ч как текст строки
+            If база(нач) < 0 Then
+                ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, 1)).Font.Color = cNum
+            Else
+                ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, 1)).Font.Color = “екстЌа(база(нач))
+            End If
             нач = ri
         End If
     Next ri
@@ -2645,8 +2798,11 @@ Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As L
             For ri = 2 To n + 1
                 If цв(ri) <> цв(нач) Then
                     If цв(нач) >= 0 Then
-                        ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
-                                 ws.Cells(rData + ri - 2, cData + ci - 1)).Interior.Color = цв(нач)
+                        With ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
+                                      ws.Cells(rData + ri - 2, cData + ci - 1))
+                            .Interior.Color = цв(нач)
+                            .Font.Color = “екстЌа(цв(нач))
+                        End With
                     End If
                     нач = ri
                 End If
@@ -2654,7 +2810,44 @@ Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As L
         End If
     Next ci
 
+    ' прочерки вместо пустых значений Ч серые на любой заливке
+    Dim тело As Range
+    Set тело = ws.Range(ws.Cells(rData, cData), ws.Cells(rLast, cLast))
+    If тело.Cells.Count = 1 Then
+        If VarType(тело.Value) = vbString Then тело.Font.Color = C_ѕ–ќ„≈– 
+    Else
+        On Error Resume Next
+        тело.SpecialCells(xlCellTypeConstants, xlTextValues).Font.Color = C_ѕ–ќ„≈– 
+        On Error GoTo 0
+    End If
+
 End Sub
+
+' ÷вет текста на заливке: белый, если он контрастнее тЄмного (WCAG)
+Private Function “екстЌа(ByVal заливка As Long) As Long
+    Dim L As Double
+    If заливка < 0 Then “екстЌа = C_“≈ —“: Exit Function
+    L = —ветлота(заливка)
+    If (1.05 / (L + 0.05)) > ((L + 0.05) / (—ветлота(C_“≈ —“) + 0.05)) Then
+        “екстЌа = RGB(255, 255, 255)
+    Else
+        “екстЌа = C_“≈ —“
+    End If
+End Function
+
+' ќтносительна€ €ркость цвета (WCAG 2.x)
+Private Function —ветлота(ByVal c As Long) As Double
+    Dim к(1 To 3) As Double, i As Long, v As Double
+    к(1) = (c Mod 256) / 255
+    к(2) = ((c \ 256) Mod 256) / 255
+    к(3) = ((c \ 65536) Mod 256) / 255
+    For i = 1 To 3
+        v = к(i)
+        If v <= 0.03928 Then v = v / 12.92 Else v = ((v + 0.055) / 1.055) ^ 2.4
+        к(i) = v
+    Next i
+    —ветлота = 0.2126 * к(1) + 0.7152 * к(2) + 0.0722 * к(3)
+End Function
 
 ' ћетки ролей кусками: строки (столбец A) или колонки (строка нумерации)
 Private Sub ѕометить уски(ws As Worksheet, ByVal r0 As Long, ByVal c0 As Long, _
@@ -2678,57 +2871,27 @@ Private Sub ѕометить уски(ws As Worksheet, ByVal r0 As Long, ByVal c0 As Long, _
     Next i
 End Sub
 
-' ќбъединение одинаковых заголовков по горизонтали и Ђвис€щихї Ч по вертикали
+' ќбъединение заголовков по плану €дра (ѕланЎапки): одинаковые подписи Ч
+' по горизонтали, Ђвис€щиеї Ч по вертикали. ѕлан заранее исключает
+' пересечени€: Excel сливает пересекающиес€ объединени€ в один блок
+' и стирает подписи внутри него.
 Private Sub ќбъединитьЎапку(ws As Worksheet, ByVal rHdr As Long, ByVal cData As Long)
 
-    Dim k As Long, ci As Long, a As Long, п As Long
+    Dim i As Long
     Dim былиѕредупреждени€ As Boolean
     былиѕредупреждени€ = Application.DisplayAlerts
     Application.DisplayAlerts = False
 
-    ' по горизонтали Ч соседние столбцы с одинаковым текстом на всех уровн€х до k
-    For k = 1 To nLev
-        ci = 1
-        Do While ci <= nCOrd
-            a = ci
-            Do While ci + 1 <= nCOrd
-                If Not ќдинаковыƒо(cOrd(a), cOrd(ci + 1), k) Then Exit Do
-                If Len(Trim$(dLev(cOrd(a), k))) = 0 Then Exit Do
-                ci = ci + 1
-            Loop
-            If ci > a Then
-                ws.Range(ws.Cells(rHdr + k - 1, cData + a - 1), _
-                         ws.Cells(rHdr + k - 1, cData + ci - 1)).Merge
-            End If
-            ci = ci + 1
-        Loop
-    Next k
-
-    ' по вертикали Ч у столбцов, чьи нижние уровни пустые (итоги):
-    ' подпись раст€гиваем от последнего непустого уровн€ до низа шапки
-    For ci = 1 To nCOrd
-        k = 1
-        For п = nLev To 1 Step -1
-            If Len(Trim$(dLev(cOrd(ci), п))) > 0 Then k = п: Exit For
-        Next п
-        If k < nLev Then
-            On Error Resume Next
-            ws.Range(ws.Cells(rHdr + k - 1, cData + ci - 1), _
-                     ws.Cells(rHdr + nLev - 1, cData + ci - 1)).Merge
-            On Error GoTo 0
-        End If
-    Next ci
+    ѕланЎапки
+    For i = 1 To nќбъед
+        On Error Resume Next
+        ws.Range(ws.Cells(rHdr + mќб 1(i) - 1, cData + mќб—1(i) - 1), _
+                 ws.Cells(rHdr + mќб 2(i) - 1, cData + mќб—2(i) - 1)).Merge
+        On Error GoTo 0
+    Next i
 
     Application.DisplayAlerts = былиѕредупреждени€
 End Sub
-
-Private Function ќдинаковыƒо(ByVal a As Long, ByVal b As Long, ByVal k As Long) As Boolean
-    Dim i As Long
-    For i = 1 To k
-        If StrComp(dLev(a, i), dLev(b, i), vbTextCompare) <> 0 Then Exit Function
-    Next i
-    ќдинаковыƒо = True
-End Function
 
 Private Sub √раницы(rng As Range)
     Dim i As Variant
