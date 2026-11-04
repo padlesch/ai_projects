@@ -154,3 +154,14 @@ def test_http_server_and_origin_check(folder):
         assert e.value.code == 400 and "Нет папки" in json.loads(e.value.read())["error"]
     finally:
         server.shutdown()
+
+
+def test_pick_folder_cyrillic_path_and_errors(monkeypatch):
+    """На Windows ответ окна выбора идёт в кодировке консоли (cp1251) — путь с кириллицей раньше терялся,
+    и кнопка «Выбрать…» молча ничего не делала."""
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1251")
+    path = "C:\\\\Users\\\\comp\\\\обучение\\\\апп стац\\\\reps"
+    ok = A.pick_folder(f'import json; print(json.dumps({{"folder": "{path}"}}))')
+    assert ok == {"folder": "C:\\Users\\comp\\обучение\\апп стац\\reps", "error": ""}
+    assert "no display" in A.pick_folder('raise RuntimeError("no display")')["error"]
+    assert A.pick_folder('import json; print(json.dumps({"folder": ""}))') == {"folder": "", "error": ""}

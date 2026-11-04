@@ -340,16 +340,44 @@ def preview(payload):
 
 
 # ---------------------------------------------------------------- система
-def pick_folder():
-    """Системный диалог выбора папки (tkinter в отдельном процессе — не мешает серверу)."""
-    code = ("import tkinter as t, tkinter.filedialog as d; r=t.Tk(); r.withdraw(); r.attributes('-topmost', 1); "
-            "print(d.askdirectory(title='Папка с CSV') or '')")
+PICK_CODE = """
+import json, sys
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except Exception as err:
+    print(json.dumps({"error": "в этом Python нет модуля tkinter (окно выбора папки): " + str(err)}))
+    sys.exit()
+root = tk.Tk()
+root.withdraw()
+root.attributes("-topmost", True)      # поверх браузера
+root.lift()
+root.focus_force()
+path = filedialog.askdirectory(parent=root, title="Папка с CSV", mustexist=True)
+root.destroy()
+print(json.dumps({"folder": path or ""}))   # ASCII-экранирование: кириллица не зависит от кодировки консоли
+"""
+
+
+def pick_folder(code=PICK_CODE):
+    """Системное окно выбора папки (tkinter в отдельном процессе — не мешает серверу).
+    Ответ дочернего процесса — JSON в ASCII: на Windows канал идёт в кодировке консоли (cp1251), и путь
+    с кириллицей («…\\обучение\\апп стац…») иначе не читается."""
     try:
-        res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600,
-                             encoding="utf-8")
-        return res.stdout.strip()
-    except Exception:
-        return ""
+        res = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"folder": "", "error": "окно выбора папки не ответило за 10 минут"}
+    except Exception as err:
+        return {"folder": "", "error": f"не удалось открыть окно выбора папки: {err}"}
+    out = res.stdout.decode("ascii", errors="replace").strip().splitlines()
+    try:
+        data = json.loads(out[-1]) if out else {}
+    except ValueError:
+        data = {}
+    if not data:
+        tail = res.stderr.decode("utf-8", errors="replace").strip().splitlines()[-1:] or ["нет ответа"]
+        return {"folder": "", "error": f"окно выбора папки не открылось: {tail[0]}"}
+    return {"folder": data.get("folder", ""), "error": data.get("error", "")}
 
 
 def open_path(path):
@@ -392,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
             routes = {"/api/analyze": lambda: analyze(payload.get("folder", "")),
                       "/api/build": lambda: run_build(payload),
                       "/api/preview": lambda: preview(payload),
-                      "/api/pick": lambda: {"folder": pick_folder()}}
+                      "/api/pick": pick_folder}
             if self.path in routes:
                 return self.send_json(routes[self.path]())
             if self.path == "/api/open":
@@ -629,9 +657,14 @@ async function api(path, body) {
 function showErr(m) { $("#err").textContent = m; $("#err").classList.toggle("hidden", !m); }
 
 // ---------- папка
-$("#pick").onclick = async () => { status("Открываю окно выбора папки…");
-  try { const j = await api("/api/pick"); if (j.folder) { $("#folder").value = j.folder; analyze(); } else status("Папка не выбрана."); }
-  catch (e) { status("Не удалось открыть окно — вставьте путь вручную."); } };
+const PASTE_HINT = " Вставьте путь вручную: в Проводнике щёлкните по адресной строке папки и скопируйте путь (или Shift + правая кнопка по папке → «Копировать как путь»).";
+$("#pick").onclick = async () => { status("Открываю окно выбора папки… (если не видно — проверьте панель задач)"); showErr("");
+  $("#pick").disabled = true;
+  try { const j = await api("/api/pick");
+    if (j.error) { showErr("Кнопка «Выбрать…»: " + j.error + "." + PASTE_HINT); status(""); }
+    else if (j.folder) { $("#folder").value = j.folder; analyze(); } else status("Папка не выбрана."); }
+  catch (e) { showErr("Кнопка «Выбрать…»: " + e.message + "." + PASTE_HINT); status(""); }
+  finally { $("#pick").disabled = false; } };
 $("#analyze").onclick = () => analyze();
 $("#folder").addEventListener("keydown", e => { if (e.key === "Enter") analyze(); });
 async function analyze() {
