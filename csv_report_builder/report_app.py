@@ -1051,6 +1051,7 @@ $("#build").onclick = async () => {
 
 
 if __name__ == "__main__":
+    R.safe_console()
     if "--pick-folder" in sys.argv:            # окно выбора папки в отдельном процессе (нужно для exe)
         exec(PICK_CODE)
         sys.exit()

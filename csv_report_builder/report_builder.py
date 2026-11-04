@@ -2338,7 +2338,21 @@ def write_template(src_dir, cfg, path):
 
 
 # ---------------------------------------------------------------- запуск
+def safe_console():
+    """Вывод в консоль без падений: при перенаправлении (в файл, в другую программу, планировщик) Windows отдаёт
+    кодировку cp1252/cp1251, где нет части символов, и print падал с UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.isatty():
+                stream.reconfigure(errors="replace")
+            else:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main():
+    safe_console()
     p = argparse.ArgumentParser(description="Excel-отчёт в едином оформлении из всех CSV в папке")
     p.add_argument("src", help="папка с CSV")
     p.add_argument("--out", help="итоговый .xlsx (по умолчанию <папка>.xlsx рядом с папкой)")
