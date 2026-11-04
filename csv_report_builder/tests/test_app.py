@@ -165,3 +165,97 @@ def test_pick_folder_cyrillic_path_and_errors(monkeypatch):
     assert ok == {"folder": "C:\\Users\\comp\\обучение\\апп стац\\reps", "error": ""}
     assert "no display" in A.pick_folder('raise RuntimeError("no display")')["error"]
     assert A.pick_folder('import json; print(json.dumps({"folder": ""}))') == {"folder": "", "error": ""}
+
+
+# ---------------------------------------------------------------- правки для части файлов, шаблоны, прогресс
+def test_column_settings_for_some_files_only(tmp_path):
+    for name in ("rep_19_1_202610290117.csv", "rep_19_2_202610290117.csv", "rep_20_1_202610290117.csv"):
+        write_raw(tmp_path / name, "Регион;Показатель\nМосква;5\nКазань;7\n")
+    a = page_state(tmp_path)
+    a["by_col"]["Регион"].update(label="Субъект", set_label=True)                 # для всех файлов
+    for f in a["files"]:
+        if f["group"] == "19":                                                     # только отчёты 19.*
+            f["colrules"]["Показатель"] = {"kind": "money", "label": "Показатель", "highlight": False,
+                                           "set_kind": True, "set_label": False, "set_hl": False}
+    res = A.run_build(payload(a))
+    assert res["ok"], res["log"]
+    raw = R.load_raw(str(tmp_path / "report.yaml"))
+    assert raw["columns"] == {"Регион": {"label": "Субъект"}}
+    assert raw["files"]["rep_19_1_202610290117.csv"]["columns"] == {"Показатель": {"role": "metric", "kind": "money"}}
+    assert "rep_20_1_202610290117.csv" not in raw["files"]
+    wb = load_workbook(res["out"])
+    w19, w20 = wb["Отчёт 19.1"], wb["Отчёт 20.1"]
+    assert w19.cell(5, 1).value == w20.cell(5, 1).value == "Субъект"               # общая подпись — везде
+    assert w19.cell(9, 2).number_format == R.FMT["money"] and w20.cell(9, 2).number_format != R.FMT["money"]
+    b = page_state(tmp_path)                                                       # повторный анализ видит своё
+    f19 = next(f for f in b["files"] if f["file"].startswith("rep_19_1"))
+    assert f19["colrules"]["Показатель"]["kind"] == "money" and f19["colrules"]["Показатель"]["set_kind"]
+
+
+def test_template_save_and_apply_to_next_period(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPORT_MAKER_HOME", str(tmp_path / "home"))
+    oct_ = tmp_path / "oct"
+    nov = tmp_path / "nov"
+    oct_.mkdir()
+    nov.mkdir()
+    write_raw(oct_ / "rep_1_1_202610290117.csv", "Регион;Сумма\nМосква;5\n")
+    write_raw(nov / "rep_1_1_202611290900.csv", "Регион;Сумма\nКазань;9\n")       # другой день выгрузки
+    a = page_state(oct_)
+    a["by_col"]["Регион"].update(label="Субъект", set_label=True)
+    a["by_file"]["rep_1_1_202610290117.csv"].update(sheet="Свод", set_sheet=True, description="Свод по регионам")
+    saved = A.save_template(dict(payload(a, title="АПП"), name="АПП / стационары"))
+    assert saved["name"] == "АПП _ стационары" and saved["templates"] == ["АПП _ стационары"]
+    cfg = A.load_template("АПП _ стационары")
+    assert list(cfg["files"]) == [r"re:^rep_1_1_\d{8,}\.csv$"] and "output" not in cfg.get("book", {})
+    b = A.analyze(str(nov), template="АПП _ стационары")                           # применить к ноябрю
+    f = b["files"][0]
+    assert b["book"]["title"] == "АПП" and f["sheet"] == "Свод" and f["description"] == "Свод по регионам"
+    assert next(c for c in b["columns"] if c["name"] == "Регион")["label"] == "Субъект"
+    res = A.run_build(dict(payload(b), template="АПП _ стационары"))
+    assert res["ok"] and load_workbook(res["out"])["Свод"].cell(5, 1).value == "Субъект"
+    assert (nov / "report.yaml").exists()                                           # сохранено в папку ноября
+    with pytest.raises(ValueError):
+        A.load_template("нет такого")
+
+
+def test_background_build_reports_progress(folder):
+    import time
+    a = page_state(folder)
+    job = A.start_build(payload(a))["job"]
+    for _ in range(200):
+        st = A.job_status(job)
+        if not st["running"]:
+            break
+        time.sleep(0.05)
+    assert st["result"]["ok"] and st["total"] == 5 and st["done"] == 5
+
+
+def test_sum_check_and_outline_in_hierarchy(tmp_path):
+    head = ["Уровень", "Наименование", "Группа", "Сумма 2026", "Пациенты 2026"]
+    write_csv(tmp_path / "h.csv", head, [[0, "Всего", "", "10,00", 10], [1, "А", "А", "4,00", 6],
+                                         [1, "Б", "Б", "5,00", 6]])                 # 4 + 5 ≠ 10
+    out = str(tmp_path) + ".xlsx"
+    R.build(str(tmp_path), R.deep_merge(R.DEFAULTS, {}), out)
+    wb = load_workbook(out)
+    ws = wb.worksheets[1]
+    notes = [r[9] for r in wb[R.TOC_SHEET].iter_rows(values_only=True) if r and len(r) > 9 and r[9]]
+    assert any("сверка сумм: 1 расхожд." in n and "Сумма 2026" in n for n in notes)  # пациенты не сверяются
+    assert ws.cell(7, 2).value == "Всего" and ws.cell(7, 3).font.color.rgb.endswith("9E3423")   # выделена
+    assert not ws.cell(7, 4).font.color.rgb.endswith("9E3423")                    # пациенты не сверяются
+    assert [ws.row_dimensions[r].outline_level for r in (7, 8, 9)] == [0, 1, 1]
+    assert ws.sheet_properties.outlinePr.summaryBelow is False
+
+
+def test_picker_command_in_frozen_exe(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert A.picker_command("code") == [sys.executable, "--pick-folder"]
+    monkeypatch.setattr(sys, "frozen", False)
+    assert A.picker_command("code")[1:] == ["-c", "code"]
+
+
+def test_template_mask_does_not_leak_between_reports():
+    """Маска отчёта 1 не должна подходить к отчёту 1.1 (иначе его имя листа протекло бы в 1.1)."""
+    m1 = A.generalize("rep_app_stac_1_202610290117.csv")
+    assert R.pattern_match(m1, "rep_app_stac_1_202611300800.csv")
+    assert not R.pattern_match(m1, "rep_app_stac_1_1_202611300800.csv")
+    assert A.generalize("ref.csv") == "ref.csv"

@@ -108,6 +108,8 @@ DEFAULTS = {
         "sort": None,                  # «-Сумма 2026» — по убыванию; «Наименование» — по возрастанию
         "key": None,                   # главная метрика: выделенная колонка, сортировка детей в иерархии
         "hierarchy_sort": "auto",      # иерархия: auto — дети по убыванию главной метрики; off — порядок CSV
+        "check": "money",              # иерархия: сверка «родитель = сумма строк ниже» — money (деньги) | all | off
+        "outline": True,               # иерархия: группировка строк Excel (+/−) по уровням
         "row_numbers": "auto",         # колонка «№»: auto — только в иерархических отчётах
         "column_numbers": True,        # строка с номерами колонок под шапкой
         "freeze_columns": "auto",      # сколько колонок закрепить слева; auto — колонки до первой метрики (≤3)
@@ -279,7 +281,8 @@ def file_config(cfg, file_name):
             own = deep_merge(own, rule or {})
     fc["table"] = deep_merge(cfg["table"], own.pop("table", {}))
     fc["coloring"] = deep_merge(cfg["coloring"], own.pop("coloring", {}))
-    fc["columns"].update(own.pop("columns", {}) or {})
+    for name, rule in (own.pop("columns", {}) or {}).items():    # правило файла — поверх общего, по ключам
+        fc["columns"][name] = dict(fc["columns"].get(name) or {}, **(rule or {}))
     fc.update(own)          # sheet, title, subtitle, description, order, skip
     return fc
 
@@ -712,11 +715,27 @@ def prepare(path, file_name, fc, period):
 
     rows = list(range(rep.n_rows))
     if rep.hierarchy:
-        rows = hierarchy_order(cols, level, table)
+        issues = []
+        rows = hierarchy_order(cols, level, table, issues)
     elif table.get("sort"):
         rows = flat_order(cols, table["sort"], file_name)
     for c in cols:
         c.values = [c.values[i] for i in rows]
+    rep.check_cells = set()
+    if rep.hierarchy and issues:
+        pos = {i: k for k, i in enumerate(rows)}
+        rep.check_cells = {(pos[i], id(c)) for i, c, _, _ in issues}
+        names = next((c for c in cols if c.role == "name"), None)
+        examples = []
+        for i, c, parent, total in issues[:3]:
+            who = names.values[pos[i]] if names is not None else f"строка {pos[i] + 1}"
+            num = lambda v: f"{v:,.2f}".replace(",", " ").replace(".", ",")   # noqa: E731
+            examples.append(f"«{who}», {c.name}: {num(parent)} ≠ {num(total)}")
+        rep.check_notes = [f"сверка сумм: {len(issues)} расхожд. «строка ≠ сумма строк ниже» (ячейки выделены): "
+                           + "; ".join(examples) + (" …" if len(issues) > 3 else "")]
+    else:
+        rep.check_notes = []
+    rep.notes += rep.check_notes
 
     # раскладка колонок
     if rep.hierarchy:
@@ -802,7 +821,7 @@ def subrow_flags(cols, n):
             for i in range(n)]
 
 
-def hierarchy_order(cols, level, table):
+def hierarchy_order(cols, level, table, issues=None):
     """Порядок строк иерархического отчёта. Порядок строк в CSV не важен (выгрузка часто идёт по уровням:
     сначала все группы 1-го уровня, потом все 2-го…):
       • родитель строки уровня N — строка уровня N−1 с теми же значениями разрезов; разрез относится к уровню,
@@ -869,7 +888,29 @@ def hierarchy_order(cols, level, table):
             walk(child)
     for child in sorted(root["children"], key=key):
         walk(child)
+    if issues is not None:
+        check_sums(nodes, cols, table, issues)
     return out
+
+
+def check_sums(nodes, cols, table, issues):
+    """Сверка иерархии: значение строки = сумма строк уровнем ниже (подстроки «из них» не считаются).
+    По умолчанию только деньги: штуки в отчётах часто уникальные (пациенты), родитель законно ≠ сумме."""
+    mode = str(table.get("check", "money")).lower()
+    if mode in ("off", "false", "0", "none"):
+        return
+    kinds = ("money",) if mode == "money" else ("money", "count")
+    metrics = [c for c in cols if c.is_metric and c.kind in kinds and not c.formula and not c.nosum]
+    for node in nodes:
+        if not node["children"]:
+            continue
+        for c in metrics:
+            parent = c.values[node["i"]]
+            if not isinstance(parent, (int, float)):
+                continue
+            total = sum(v for v in (c.values[ch["i"]] for ch in node["children"]) if isinstance(v, (int, float)))
+            if abs(parent - total) > max(0.011, abs(parent) * 1e-6):
+                issues.append((node["i"], c, parent, total))
 
 
 def flat_order(cols, sort, file_name):
@@ -1142,11 +1183,18 @@ def write_sheet(ws, rep, fc, cfg, st):
     first_ci, last_ci = 1, ncols
     ws.sheet_format.defaultRowHeight = 18.75 * size / 14      # высота строк данных — по умолчанию листа
     ws.sheet_format.customHeight = True
+    check_cells = getattr(rep, "check_cells", set())
+    alert_font = st.font(None, True, P["alert"])
+    outline = rep.hierarchy and bool(table.get("outline", True))
+    if outline:                       # группировка строк: кнопки +/− над группой (итог группы — сверху)
+        ws.sheet_properties.outlinePr.summaryBelow = False
 
     for i in range(n):
         r = first_data + i
         lvl = levels[i]
         last = i == n - 1
+        if outline and lvl:
+            ws.row_dimensions[r].outline_level = min(int(lvl), 7)
         if rep.hierarchy:
             fill = level_fill(lvl) if (not is_leaf[i] or lvl == 0) else None
             bold = lvl <= 1
@@ -1176,6 +1224,8 @@ def write_sheet(ws, rep, fc, cfg, st):
             if fill is None:
                 fill = color_at.get(id(c), {}).get(i) or (key_fill if (c is key_metric and not sub) else None)
             border = st.border(left=ci == first_ci, right=ci == last_ci, bottom=last)
+            if (i, id(c)) in check_cells:          # сверка: строка ≠ сумме строк ниже
+                font = alert_font
             st.stamp(cell, font, align, border, fill, fmt)
 
     # --- строка «Итого» под шапкой (SUBTOTAL 109 — только видимые после фильтра строки)

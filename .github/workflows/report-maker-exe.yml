@@ -1,0 +1,58 @@
+name: ReportMaker.exe
+
+# Собирает csv_report_builder/report_app.py в один ReportMaker.exe (Windows), проверяет его и выкладывает
+# в Artifacts этого запуска: Actions -> «ReportMaker.exe» -> последний запуск -> ReportMaker-windows.
+on:
+  push:
+    branches: [main]
+    paths: ["csv_report_builder/**", ".github/workflows/report-maker-exe.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: csv_report_builder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Зависимости
+        run: python -m pip install -r requirements-dev.txt pyinstaller
+      - name: Тесты
+        run: python -m pytest -q tests
+      - name: Сборка exe
+        run: >
+          python -m PyInstaller --noconfirm --onefile --name ReportMaker --console
+          --hidden-import tkinter --hidden-import tkinter.filedialog --exclude-module pyarrow report_app.py
+      - name: Проверка exe — страница, анализ папки, сборка книги
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "reps"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          [IO.File]::WriteAllText("$dir\rep_1_202611010000.csv", "Уровень;Наименование;Группа;Сумма 2026;Сумма 2025`n0;Всего;;10;9`n1;А;А;4;3`n1;Б;Б;6;6`n", [Text.Encoding]::GetEncoding(1251))
+          $p = Start-Process dist\ReportMaker.exe -ArgumentList "--no-browser","--port","8799" -PassThru
+          Start-Sleep -Seconds 20
+          try {
+            $page = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
+            if ($page.StatusCode -ne 200 -or $page.Content -notmatch "api/analyze") { throw "страница не открылась" }
+            $body = @{ folder = $dir } | ConvertTo-Json
+            $a = Invoke-RestMethod -Method Post http://127.0.0.1:8799/api/analyze -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType "application/json"
+            if ($a.files.Count -ne 1 -or -not $a.files[0].hierarchy) { throw "анализ папки: неожиданный ответ" }
+            $a | Add-Member -NotePropertyName out -NotePropertyValue "$dir.xlsx" -Force
+            $job = Invoke-RestMethod -Method Post http://127.0.0.1:8799/api/build -Body ([Text.Encoding]::UTF8.GetBytes(($a | ConvertTo-Json -Depth 20))) -ContentType "application/json"
+            for ($i = 0; $i -lt 60; $i++) {
+              $st = Invoke-RestMethod -Method Post http://127.0.0.1:8799/api/job -Body (@{ job = $job.job } | ConvertTo-Json) -ContentType "application/json"
+              if (-not $st.running) { break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $st.result.ok -or -not (Test-Path "$dir.xlsx")) { throw "книга не собрана: $($st.result.log)" }
+            Write-Host "exe работает: книга $dir.xlsx"
+          } finally { Stop-Process -Id $p.Id -Force }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReportMaker-windows
+          path: csv_report_builder/dist/ReportMaker.exe
+          if-no-files-found: error

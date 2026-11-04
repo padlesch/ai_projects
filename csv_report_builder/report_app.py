@@ -17,6 +17,7 @@ import datetime as dt
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -56,38 +57,58 @@ def group_of(file_name):
     return no.split(".")[0] if no else "без номера"
 
 
-def analyze(folder):
-    """Папка -> книга, все колонки папки (по имени, с числом файлов) и все файлы."""
+def own_file_rules(raw, f):
+    """Настройки файла из конфига: все подходящие ключи files (точное имя и маски, например из шаблона)."""
+    own = {}
+    for pattern, rule in (raw.get("files") or {}).items():
+        if R.pattern_match(pattern, f) or R.pattern_match(pattern, os.path.splitext(f)[0]):
+            own = R.deep_merge(own, rule or {})
+    return own
+
+
+def col_state(c, hl, rule):
+    return {"kind": ui_kind(c), "label": c.label, "highlight": id(c) in hl,
+            "set_kind": "kind" in rule or "role" in rule, "set_label": "label" in rule,
+            "set_hl": "colorize" in rule}
+
+
+def analyze(folder, template=None):
+    """Папка -> книга, все колонки папки (по имени, с числом файлов) и все файлы.
+    template — взять настройки из шаблона вместо report.yaml папки (сохранятся в папку при сборке)."""
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         raise ValueError(f"Нет папки {folder}")
     cpath = config_path_for(folder)
-    cfg, raw = R.load_config(cpath), R.load_raw(cpath)
+    raw = load_template(template) if template else R.load_raw(cpath)
+    cfg = R.deep_merge(R.DEFAULTS, raw)
     plan = R.plan_questions(folder, cfg, raw)
     if not plan["reports"] and not plan["broken"]:
         raise ValueError("В папке нет CSV-файлов")
     rules = raw.get("columns") or {}
-    files_raw = raw.get("files") or {}
     all_files = [f for f, _ in plan["reports"]]
     struct_id = {}
     columns, files = {}, []
     used = set()
     for f, rep in plan["reports"]:
         fc = R.file_config(cfg, f)
+        own = own_file_rules(raw, f)
+        own_cols = own.get("columns") or {}
         # подсветка — свойство колонки (правило colorize или «все Δ и Δ%»); старые списки по файлу не учитываются
         hl = {id(c) for c in R.colored_columns(rep, dict(cfg["coloring"], columns=None))}
         unsure, tech = R.doubts(rep, rules)
         main, _ = R.main_metric(rep.metrics, rep.table)
+        file_cols = {}
         for c in rep.columns:
+            overridden = c.name in own_cols
+            st = col_state(c, hl, own_cols.get(c.name) or {})
+            file_cols[c.name] = st
             item = columns.get(c.name)
-            if item is None:
-                rule = R.rules_for(rules, c.name)
-                item = columns[c.name] = {
-                    "name": c.name, "kind": ui_kind(c), "label": c.label,
-                    "highlight": id(c) in hl, "formula": bool(c.formula), "files": [],
-                    "sample": [str(v) for v in c.sample[:3]], "flags": [],
-                    "set_kind": "kind" in rule or "role" in rule, "set_label": "label" in rule,
-                    "set_hl": "colorize" in rule, "kinds_seen": {}}
+            if item is None or (item["from_override"] and not overridden):
+                g = col_state(c, hl, R.rules_for(rules, c.name))
+                base = item or {"name": c.name, "formula": bool(c.formula), "files": [], "flags": [],
+                                "sample": [str(v) for v in c.sample[:3]], "kinds_seen": {}}
+                base.update(g, from_override=overridden)
+                item = columns[c.name] = base
             item["files"].append(f)
             k = ui_kind(c)
             item["kinds_seen"][k] = item["kinds_seen"].get(k, 0) + 1
@@ -98,12 +119,11 @@ def analyze(folder):
                 if x not in item["flags"]:
                     item["flags"].append(x)
         key = (rep.hierarchy, tuple(c.name for c in rep.source_columns))
-        entry = files_raw.get(f) or {}
         sheet_auto = R.default_sheet_name(f, all_files)
-        sheet = R.sheet_title(entry.get("sheet") or fc.get("sheet") or sheet_auto, used)
+        sheet = R.sheet_title(own.get("sheet") or sheet_auto, used)
         files.append({
-            "file": f, "sheet": sheet, "set_sheet": bool(entry.get("sheet")), "sheet_auto": sheet_auto,
-            "description": entry.get("description", ""), "subtitle": entry.get("subtitle", ""),
+            "file": f, "sheet": sheet, "set_sheet": bool(own.get("sheet")), "sheet_auto": sheet_auto,
+            "description": own.get("description", ""), "subtitle": own.get("subtitle", ""),
             "rows": rep.n_rows, "cols": len(rep.source_columns), "hierarchy": rep.hierarchy,
             "structure": struct_id.setdefault(key, len(struct_id) + 1), "group": group_of(f),
             "totals_applicable": not rep.hierarchy and any(c.additive for c in rep.metrics),
@@ -112,16 +132,21 @@ def analyze(folder):
             "key_auto": main.name if main is not None else "",
             "key_options": [c.name for c in rep.metrics if c.kind in ("count", "money", "number")],
             "skip": False, "notes": rep.notes, "doubt": bool(unsure or tech),
+            "colstate": file_cols,               # как колонки выглядят в этом файле (с учётом его настроек)
+            "colrules": {n: dict(s) for n, s in file_cols.items()
+                         if s["set_kind"] or s["set_label"] or s["set_hl"]},   # настройки только этого файла
         })
-    for f, rule in files_raw.items():                 # файлы, пропущенные в конфиге, — тоже в списке
-        if (rule or {}).get("skip") and os.path.exists(os.path.join(folder, f)):
+    for f in sorted(x for x in os.listdir(folder) if x.lower().endswith(".csv")):   # пропущенные в конфиге
+        if own_file_rules(raw, f).get("skip") and f not in all_files:
             files.append({"file": f, "sheet": "", "set_sheet": False, "sheet_auto": "", "description": "",
                           "subtitle": "", "rows": None, "cols": None, "hierarchy": False, "structure": 0,
                           "group": group_of(f), "totals_applicable": False, "totals": True, "key": "",
-                          "key_auto": "", "key_options": [], "skip": True, "notes": [], "doubt": False})
+                          "key_auto": "", "key_options": [], "skip": True, "notes": [], "doubt": False,
+                          "colstate": {}, "colrules": {}})
     cols = []
     for item in columns.values():
         seen = item.pop("kinds_seen")
+        item.pop("from_override", None)
         if len(seen) > 1:      # в разных файлах распознано по-разному — показать и предложить выровнять
             item["flags"].append("в разных файлах: " + ", ".join(f"{KIND_LABELS.get(k, k)} — {n}"
                                                                     for k, n in seen.items()))
@@ -131,23 +156,46 @@ def analyze(folder):
     cols.sort(key=lambda c: (not c["doubt"], c["formula"], -c["n_files"], c["name"].lower()))
     book = raw.get("book") or {}
     return {
-        "folder": folder, "config": cpath,
+        "folder": folder, "config": cpath, "template": template or "",
         "out": book.get("output") or folder.rstrip("\\/") + ".xlsx",
         "book": {"title": book.get("title") or os.path.basename(folder.rstrip("\\/")),
                  "subtitle": book.get("subtitle") or "", "period": book.get("period") or "",
                  "positive_is": (raw.get("coloring") or {}).get("positive_is", "bad"),
                  "palette": str((raw.get("style") or {}).get("palette", "B")).upper()},
         "has_years": any(c.year for _, r in plan["reports"] for c in r.metrics),
-        "columns": cols, "files": files, "kinds": KIND_LABELS,
+        "columns": cols, "files": files, "kinds": KIND_LABELS, "templates": list_templates(),
         "broken": [{"file": f, "reason": e} for f, e in plan["broken"]],
         "n_files": len(plan["reports"]) + len(plan["broken"]),
         "n_structures": len(struct_id),
     }
 
 
+def apply_column_state(rules, c):
+    """Правило колонки по флагам set_*: True — записать явно, False — убрать (решает автоматика / общее)."""
+    rule = rules.setdefault(c["name"], {})
+    if not c.get("formula"):
+        rule.pop("kind", None)
+        rule.pop("role", None)
+        if c.get("set_kind") and c.get("kind") in KIND_LABELS:
+            if c["kind"] in R.ROLE_KINDS:
+                rule["role"] = c["kind"]
+            else:
+                rule.update({"role": "metric", "kind": c["kind"]})
+        rule.pop("label", None)
+        label = str(c.get("label") or "").strip()
+        if c.get("set_label") and label:
+            rule["label"] = label
+    rule.pop("colorize", None)
+    if c.get("set_hl"):
+        rule["colorize"] = bool(c.get("highlight"))
+    if not rule:
+        rules.pop(c["name"])
+
+
 def settings_to_config(payload, raw):
-    """Состояние страницы -> report.yaml. У колонки флаги set_kind / set_label / set_hl: True — записать явно,
-    False — убрать из конфига (решает автоматика). Прочие ключи правил (формат, ширина…) не трогаются."""
+    """Состояние страницы -> report.yaml. Флаги set_kind / set_label / set_hl: True — записать явно,
+    False — убрать из конфига. Колонки — для всех файлов (columns) и для отдельных (files.X.columns).
+    Прочие ключи правил (формат, ширина…) не трогаются."""
     raw = json.loads(json.dumps(raw or {}))
     book = raw.setdefault("book", {})
     b = payload.get("book") or {}
@@ -157,33 +205,7 @@ def settings_to_config(payload, raw):
     raw.setdefault("style", {})["palette"] = "A" if str(b.get("palette")).upper() == "A" else "B"
     rules = raw.setdefault("columns", {})
     for c in payload.get("columns") or []:
-        if c.get("formula"):
-            if c.get("set_hl") is not None:
-                rule = rules.setdefault(c["name"], {})
-                rule.pop("colorize", None)
-                if c.get("set_hl"):
-                    rule["colorize"] = bool(c.get("highlight"))
-            continue
-        rule = rules.setdefault(c["name"], {})
-        for key in ("kind", "role"):
-            if not c.get("set_kind"):
-                rule.pop(key, None)
-        if c.get("set_kind") and c.get("kind") in KIND_LABELS:
-            rule.pop("kind", None)
-            rule.pop("role", None)
-            if c["kind"] in R.ROLE_KINDS:
-                rule["role"] = c["kind"]
-            else:
-                rule.update({"role": "metric", "kind": c["kind"]})
-        rule.pop("label", None)
-        label = str(c.get("label") or "").strip()
-        if c.get("set_label") and label:
-            rule["label"] = label
-        rule.pop("colorize", None)
-        if c.get("set_hl"):
-            rule["colorize"] = bool(c.get("highlight"))
-        if not rule:
-            rules.pop(c["name"])
+        apply_column_state(rules, c)
     files = raw.setdefault("files", {})
     for f in payload.get("files") or []:
         entry = files.setdefault(f["file"], {})
@@ -215,6 +237,11 @@ def settings_to_config(payload, raw):
         if not table:
             entry.pop("table")
         entry.pop("coloring", None)        # подсветка — правилом колонки; старые списки по файлу не мешают
+        file_rules = entry.setdefault("columns", {})
+        for name, st in (f.get("colrules") or {}).items():
+            apply_column_state(file_rules, dict(st, name=name))
+        if not file_rules:
+            entry.pop("columns")
         if not entry:
             files.pop(f["file"])
     return raw
@@ -223,17 +250,89 @@ def settings_to_config(payload, raw):
 def config_from_payload(payload):
     folder = os.path.abspath(payload["folder"])
     cpath = config_path_for(folder)
-    raw = settings_to_config(payload, R.load_raw(cpath))
-    return folder, cpath, raw
+    base = load_template(payload["template"]) if payload.get("template") else R.load_raw(cpath)
+    return folder, cpath, settings_to_config(payload, base)
 
 
-def run_build(payload):
+# ---------------------------------------------------------------- шаблоны настроек
+def app_home():
+    """Папка приложения для шаблонов: %APPDATA%\\ReportMaker (Windows) или ~/.report_maker."""
+    base = os.environ.get("REPORT_MAKER_HOME") or (
+        os.path.join(os.environ["APPDATA"], "ReportMaker") if os.environ.get("APPDATA")
+        else os.path.join(os.path.expanduser("~"), ".report_maker"))
+    return os.path.join(base, "templates")
+
+
+def safe_name(name):
+    name = re.sub(r'[\\/:*?"<>|]+', "_", str(name or "").strip()).strip(". ")
+    if not name:
+        raise ValueError("Укажите название шаблона")
+    return name[:80]
+
+
+def list_templates():
+    d = app_home()
+    if not os.path.isdir(d):
+        return []
+    return sorted(os.path.splitext(f)[0] for f in os.listdir(d) if f.lower().endswith(".json"))
+
+
+def load_template(name):
+    path = os.path.join(app_home(), safe_name(name) + ".json")
+    if not os.path.exists(path):
+        raise ValueError(f"Нет шаблона «{name}»")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f).get("config") or {}
+
+
+def generalize(file_name):
+    """rep_app_stac_1_1_202610290117.csv -> re:^rep_app_stac_1_1_\\d{8,}\\.csv$ — шаблон подходит к выгрузке
+    другого дня. Точная маска, а не «rep_app_stac_1_*.csv»: та подошла бы и к отчёту 1.1."""
+    m = re.match(r"^(.*)_\d{8,}\.csv$", file_name, flags=re.I)
+    return f"re:^{re.escape(m.group(1))}_\\d{{8,}}\\.csv$" if m else file_name
+
+
+def save_template(payload):
+    """Текущие настройки страницы -> шаблон (имена файлов обобщены, путь книги не сохраняется)."""
+    name = safe_name(payload.get("name"))
+    _, _, raw = config_from_payload(payload)
+    files = {}
+    for key, rule in (raw.get("files") or {}).items():
+        files[generalize(key)] = R.deep_merge(files.get(generalize(key)) or {}, rule or {})
+    raw["files"] = files
+    (raw.get("book") or {}).pop("output", None)
+    os.makedirs(app_home(), exist_ok=True)
+    path = os.path.join(app_home(), name + ".json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"name": name, "saved": dt.datetime.now().isoformat(timespec="seconds"), "config": raw},
+                  f, ensure_ascii=False, indent=2)
+    return {"ok": True, "name": name, "path": path, "templates": list_templates()}
+
+
+# ---------------------------------------------------------------- сборка (с прогрессом)
+class ProgressLog(io.StringIO):
+    """Журнал сборки, который на лету считает обработанные файлы ([ok] / [пропуск])."""
+    def __init__(self, job):
+        super().__init__()
+        self.job = job
+
+    def write(self, text):
+        for line in text.splitlines():
+            if line.startswith(("[ok]", "[пропуск]")):
+                self.job["done"] += 1
+                self.job["current"] = line.split("<- ")[-1].strip() if "<- " in line else line.split(":")[0][10:]
+        return super().write(text)
+
+
+def run_build(payload, job=None):
     """Сохранить настройки и собрать книгу. -> {ok, out, log}."""
     folder, cpath, raw = config_from_payload(payload)
-    log = io.StringIO()
+    job = job if job is not None else {"done": 0, "total": 0, "current": ""}
+    log = ProgressLog(job)
     with contextlib.redirect_stdout(log):
         cpath = R.save_answers(raw, cpath or os.path.join(folder, "report.yaml"))
     cfg = R.load_config(cpath)
+    job["total"] = sum(1 for f in os.listdir(folder) if f.lower().endswith(".csv"))
     out = os.path.abspath(str(payload.get("out") or "").strip() or folder.rstrip("\\/") + ".xlsx")
     if not out.lower().endswith(".xlsx"):
         out += ".xlsx"
@@ -257,6 +356,31 @@ def run_build(payload):
     if ok:
         STATE["last_out"], STATE["last_folder"] = out, folder
     return {"ok": ok, "out": out, "log": log.getvalue()}
+
+
+JOBS = {}
+
+
+def start_build(payload):
+    """Сборка в фоне: страница опрашивает /api/job и показывает прогресс."""
+    job_id = f"{len(JOBS) + 1}"
+    job = JOBS[job_id] = {"done": 0, "total": 0, "current": "", "running": True, "result": None}
+
+    def work():
+        try:
+            job["result"] = run_build(payload, job)
+        except Exception as err:
+            job["result"] = {"ok": False, "out": "", "log": f"Ошибка: {type(err).__name__}: {err}"}
+        job["running"] = False
+    threading.Thread(target=work, daemon=True).start()
+    return {"job": job_id}
+
+
+def job_status(job_id):
+    job = JOBS.get(str(job_id))
+    if job is None:
+        raise ValueError("Нет такой сборки")
+    return job
 
 
 # ---------------------------------------------------------------- предпросмотр листа
@@ -359,12 +483,18 @@ print(json.dumps({"folder": path or ""}))   # ASCII-экранирование: 
 """
 
 
+def picker_command(code):
+    if getattr(sys, "frozen", False):          # собранный exe: «python -c» нет — само приложение с ключом
+        return [sys.executable, "--pick-folder"]
+    return [sys.executable, "-c", code]
+
+
 def pick_folder(code=PICK_CODE):
     """Системное окно выбора папки (tkinter в отдельном процессе — не мешает серверу).
     Ответ дочернего процесса — JSON в ASCII: на Windows канал идёт в кодировке консоли (cp1251), и путь
     с кириллицей («…\\обучение\\апп стац…») иначе не читается."""
     try:
-        res = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=600)
+        res = subprocess.run(picker_command(code), capture_output=True, timeout=600)
     except subprocess.TimeoutExpired:
         return {"folder": "", "error": "окно выбора папки не ответило за 10 минут"}
     except Exception as err:
@@ -417,9 +547,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "чужой источник запроса"}, 403)
         try:
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-            routes = {"/api/analyze": lambda: analyze(payload.get("folder", "")),
-                      "/api/build": lambda: run_build(payload),
+            routes = {"/api/analyze": lambda: analyze(payload.get("folder", ""), payload.get("template") or None),
+                      "/api/build": lambda: start_build(payload),
+                      "/api/job": lambda: job_status(payload.get("job")),
                       "/api/preview": lambda: preview(payload),
+                      "/api/template/save": lambda: save_template(payload),
+                      "/api/templates": lambda: {"templates": list_templates()},
                       "/api/pick": pick_folder}
             if self.path in routes:
                 return self.send_json(routes[self.path]())
@@ -538,6 +671,8 @@ table.xl{border-collapse:collapse;font:12.5px "Arial Narrow",Arial,sans-serif}
 .bar .out{flex:1 1 340px;display:flex;gap:6px;align-items:center}
 .bar .out span{color:var(--muted);white-space:nowrap}
 .status{color:var(--muted);flex:1 1 220px}
+progress{width:180px;height:14px;accent-color:var(--title)}
+#c-scope{font-size:12.5px;color:var(--sub)}
 .msg{padding:8px 11px;margin:8px 0;border:1px solid}
 .msg.err{background:var(--badbg);color:var(--bad);border-color:#E9B7A6}
 .msg.ok{background:var(--okbg);color:var(--ok);border-color:#BFD9B5}
@@ -554,6 +689,8 @@ pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line
 <input type="text" id="folder" placeholder="Папка с CSV, например C:\Users\...\reps" aria-label="Папка с CSV" autocomplete="off">
 <button type="button" id="pick">Выбрать…</button>
 <button type="button" class="primary" id="analyze">Анализировать</button>
+<select id="tpl" aria-label="Шаблон настроек" title="Шаблон настроек: применить к этой папке" disabled><option value="">настройки папки</option></select>
+<button type="button" id="tpl-save" disabled title="Сохранить текущие настройки как шаблон для других папок / периодов">Сохранить как шаблон</button>
 </div></header>
 
 <div class="wrap">
@@ -587,7 +724,9 @@ pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line
 <select id="c-f" aria-label="Фильтр колонок">
 <option value="all">все колонки</option><option value="doubt">с пометками</option><option value="metric">метрики</option>
 <option value="dim">разрезы и роли</option><option value="set">изменённые вручную</option><option value="added">добавленные Δ / Δ%</option></select>
-<select id="c-file" aria-label="Колонки файла"><option value="">во всех файлах</option></select>
+<label title="Где действуют правки: для всех файлов или только для группы / одного файла (поверх общих)">Правки для
+<select id="c-file" aria-label="Где действуют правки колонок"><option value="">всех файлов</option></select></label>
+<span id="c-scope"></span>
 <span class="status" id="c-count"></span>
 </div>
 <div class="bulk" id="c-bulk" role="region" aria-label="Действия с выбранными колонками">
@@ -641,6 +780,7 @@ pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line
 <div class="bar"><div class="in">
 <div class="out"><span>Книга:</span><input type="text" id="out" disabled aria-label="Куда сохранить книгу"></div>
 <button type="button" class="primary" id="build" disabled>Собрать Excel</button>
+<progress id="prog" class="hidden" max="1" value="0" aria-label="Прогресс сборки"></progress>
 <span class="status" id="status" aria-live="polite"></span>
 </div></div>
 
@@ -667,13 +807,24 @@ $("#pick").onclick = async () => { status("Открываю окно выбор�
   finally { $("#pick").disabled = false; } };
 $("#analyze").onclick = () => analyze();
 $("#folder").addEventListener("keydown", e => { if (e.key === "Enter") analyze(); });
-async function analyze() {
+async function analyze(template) {
   const folder = $("#folder").value.trim().replace(/^"|"$/g, ""); showErr(""); $("#result").innerHTML = "";
   if (!folder) return showErr("Укажите путь к папке с CSV.");
-  status("Читаю файлы…"); $("#analyze").disabled = true;
-  try { D = await api("/api/analyze", {folder}); pickC.clear(); pickF.clear(); init(); status("Поправьте, что нужно, и нажмите «Собрать Excel». Всё остальное решит автоматика."); }
+  status(template ? `Применяю шаблон «${template}»…` : "Читаю файлы…"); $("#analyze").disabled = true;
+  try { D = await api("/api/analyze", {folder, template: template || ""}); pickC.clear(); pickF.clear(); init();
+        status(template ? `Шаблон «${template}» применён — проверьте и нажмите «Собрать Excel» (настройки сохранятся в папку).`
+                        : "Поправьте, что нужно, и нажмите «Собрать Excel». Всё остальное решит автоматика."); }
   catch (e) { showErr(e.message); status(""); } finally { $("#analyze").disabled = false; }
 }
+function fillTemplates(list, current) {
+  $("#tpl").innerHTML = `<option value="">настройки папки</option>` + list.map(t => `<option ${t === current ? "selected" : ""}>${esc(t)}</option>`).join("");
+  $("#tpl").disabled = false; $("#tpl-save").disabled = false; }
+$("#tpl").onchange = () => analyze($("#tpl").value);
+$("#tpl-save").onclick = async () => {
+  const name = prompt("Название шаблона (например «АПП стационары»):", D.template || ""); if (!name) return;
+  try { const j = await api("/api/template/save", payload({name})); fillTemplates(j.templates, D.template);
+        status(`Шаблон «${j.name}» сохранён: ${j.path}. Его можно выбрать для другой папки или следующего периода.`); }
+  catch (e) { showErr(e.message); } };
 
 function init() {
   $("#start").classList.add("hidden"); $("#app").classList.remove("hidden");
@@ -684,7 +835,12 @@ function init() {
   D.columns.forEach(c => { c.kind0 = c.kind; c.label0 = c.label; c.hl0 = c.highlight; });
   const kopts = Object.entries(D.kinds).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("");
   $("#cb-kind").innerHTML = `<option value="">— не менять —</option>` + kopts;
-  $("#c-file").innerHTML = `<option value="">во всех файлах</option>` + D.files.filter(f => !f.skip).map(f => `<option>${esc(f.file)}</option>`).join("");
+  const live = D.files.filter(f => !f.skip), gs = {};
+  live.forEach(f => gs[f.group] = (gs[f.group] || 0) + 1);
+  $("#c-file").innerHTML = `<option value="">всех файлов</option>` +
+    `<optgroup label="группы отчётов">${Object.entries(gs).filter(([, n]) => n > 1).map(([g, n]) => `<option value="g:${esc(g)}">${g === "без номера" ? g : "отчёты " + esc(g) + ".*"} (${n} ф.)</option>`).join("")}</optgroup>` +
+    `<optgroup label="один файл">${live.map(f => `<option value="f:${esc(f.file)}">${esc(f.file)}</option>`).join("")}</optgroup>`;
+  fillTemplates(D.templates, D.template);
   const groups = [...new Set(D.files.map(f => f.group))];
   $("#f-g").innerHTML = `<option value="">все группы</option>` + groups.map(g => `<option value="${esc(g)}">${g === "без номера" ? g : "отчёты " + esc(g) + ".*"}</option>`).join("");
   $("#f-s").innerHTML = `<option value="">все структуры</option>` + [...new Set(D.files.map(f => f.structure))].filter(Boolean)
@@ -709,39 +865,48 @@ function setTab(t) { tab = t;
 // ---------- колонки
 const isMetric = k => !["dimension", "skip", "level", "name", "subrow"].includes(k);
 // пометки, на которые уже ответили вручную, не показываются: вид задан — «угадан по цифрам» снят, подпись — «тех. имя»
-function liveFlags(c) { return c.flags.filter(f => f.startsWith("техническое имя") ? !c.set_label : !c.set_kind); }
+function liveFlags(c, v) { return c.flags.filter(f => f.startsWith("техническое имя") ? !v.set_label : !v.set_kind); }
+// область правки: все файлы (общие правила) или группа / один файл (правила этих файлов поверх общих)
+function scopeFiles() { const v = $("#c-file").value; if (!v) return null;
+  return v.startsWith("g:") ? D.files.filter(f => !f.skip && f.group === v.slice(2)) : D.files.filter(f => f.file === v.slice(2)); }
+function view(c) { const fs = scopeFiles(); if (!fs) return c; const f = fs.find(f => f.colrules[c.name]); return f ? f.colrules[c.name] : c; }
+function own(c) { const fs = scopeFiles(); return fs ? fs.some(f => f.colrules[c.name]) : (c.set_kind || c.set_label || c.set_hl); }
+function edit(c, fn) { const fs = scopeFiles(); if (!fs) return fn(c);
+  fs.filter(f => f.colstate[c.name]).forEach(f => fn(f.colrules[c.name] ||= {kind: c.kind, label: c.label, highlight: c.highlight, set_kind: false, set_label: false, set_hl: false})); }
 function visibleCols() {
-  const q = $("#c-q").value.trim().toLowerCase(), f = $("#c-f").value, file = $("#c-file").value;
-  return D.columns.filter(c => (!q || c.name.toLowerCase().includes(q) || (c.label || "").toLowerCase().includes(q))
-    && (!file || c.files.includes(file))
-    && (f === "all" || (f === "doubt" && c.doubt) || (f === "metric" && isMetric(c.kind)) || (f === "dim" && !isMetric(c.kind))
-        || (f === "set" && (c.set_kind || c.set_label || c.set_hl)) || (f === "added" && c.formula)));
+  const q = $("#c-q").value.trim().toLowerCase(), f = $("#c-f").value, fs = scopeFiles();
+  return D.columns.filter(c => { const v = view(c);
+    return (!q || c.name.toLowerCase().includes(q) || (v.label || "").toLowerCase().includes(q))
+    && (!fs || fs.some(x => x.colstate[c.name]))
+    && (f === "all" || (f === "doubt" && c.doubt) || (f === "metric" && isMetric(v.kind)) || (f === "dim" && !isMetric(v.kind))
+        || (f === "set" && own(c)) || (f === "added" && c.formula)); });
 }
 ["#c-q", "#c-f", "#c-file"].forEach(s => $(s).addEventListener("input", renderCols));
 function renderCols() {
-  const rows = visibleCols();
+  const rows = visibleCols(), fs = scopeFiles();
   $("#c-count").textContent = `показано ${rows.length} из ${D.columns.length}`;
+  $("#c-scope").textContent = fs ? `правки — только для ${fs.length} файл(ов), поверх общих; точка — своя настройка` : "";
   $("#c-table tbody").innerHTML = rows.map(c => {
-    const i = D.columns.indexOf(c);
-    const kind = c.formula ? `<span>${esc(D.kinds[c.kind] || c.kind)} (добавлена)</span>` :
-      `<select data-ck="${i}" aria-label="Вид ${esc(c.name)}" class="${c.set_kind ? "set" : ""}">${Object.entries(D.kinds).map(([k, v]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>${c.set_kind ? '<span class="dot" title="задано вручную"></span>' : ""}`;
+    const i = D.columns.indexOf(c), v = view(c), mark = fs ? fs.some(f => f.colrules[c.name]) : false;
+    const kind = c.formula ? `<span>${esc(D.kinds[v.kind] || v.kind)} (добавлена)</span>` :
+      `<select data-ck="${i}" aria-label="Вид ${esc(c.name)}" class="${v.set_kind ? "set" : ""}">${Object.entries(D.kinds).map(([k, t]) => `<option value="${k}" ${k === v.kind ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>${v.set_kind || mark ? `<span class="dot" title="${mark ? "своя настройка этих файлов" : "задано вручную"}"></span>` : ""}`;
     return `<tr class="${pickC.has(i) ? "picked" : ""} ${c.doubt ? "doubt" : ""}">
     <td class="cb"><input type="checkbox" data-cp="${i}" ${pickC.has(i) ? "checked" : ""} aria-label="Выбрать ${esc(c.name)}"></td>
-    <td class="nm">${esc(c.name)}</td><td class="kind k-${c.kind}">${kind}</td>
-    <td><input type="text" data-cl="${i}" value="${esc(c.label)}" class="${c.set_label ? "set" : ""}" aria-label="Подпись ${esc(c.name)}"></td>
-    <td class="cb"><input type="checkbox" data-ch="${i}" ${c.highlight ? "checked" : ""} ${isMetric(c.kind) ? "" : "disabled"} aria-label="Подсветка ${esc(c.name)}"></td>
+    <td class="nm">${esc(c.name)}</td><td class="kind k-${v.kind}">${kind}</td>
+    <td><input type="text" data-cl="${i}" value="${esc(v.label)}" class="${v.set_label ? "set" : ""}" aria-label="Подпись ${esc(c.name)}"></td>
+    <td class="cb"><input type="checkbox" data-ch="${i}" ${v.highlight ? "checked" : ""} ${isMetric(v.kind) ? "" : "disabled"} aria-label="Подсветка ${esc(c.name)}"></td>
     <td class="num">${c.n_files}</td><td class="sample" title="${esc(c.sample.join(", "))}">${esc(c.sample.join(", "))}</td>
-    <td class="flag">${esc(liveFlags(c).join("; "))}</td></tr>`; }).join("");
+    <td class="flag">${esc(liveFlags(c, v).join("; "))}</td></tr>`; }).join("");
   $("#c-all").checked = rows.length > 0 && rows.every(c => pickC.has(D.columns.indexOf(c)));
   bulkState();
 }
 $("#c-table").addEventListener("change", e => { const t = e.target;
   if (t.dataset.cp !== undefined) { const i = +t.dataset.cp; t.checked ? pickC.add(i) : pickC.delete(i); t.closest("tr").classList.toggle("picked", t.checked); bulkState(); return; }
-  if (t.dataset.ck !== undefined) { setKind(D.columns[+t.dataset.ck], t.value); renderCols(); schedulePreview(); }
-  if (t.dataset.ch !== undefined) { const c = D.columns[+t.dataset.ch]; c.highlight = t.checked; c.set_hl = true; schedulePreview(); }
+  if (t.dataset.ck !== undefined) { edit(D.columns[+t.dataset.ck], o => setKind(o, t.value)); renderCols(); schedulePreview(); }
+  if (t.dataset.ch !== undefined) { edit(D.columns[+t.dataset.ch], o => { o.highlight = t.checked; o.set_hl = true; }); schedulePreview(); }
 });
 $("#c-table").addEventListener("input", e => { const t = e.target;
-  if (t.dataset.cl !== undefined) { const c = D.columns[+t.dataset.cl]; c.label = t.value; c.set_label = t.value !== c.label0 || c.set_label; t.classList.add("set"); schedulePreview(); } });
+  if (t.dataset.cl !== undefined) { edit(D.columns[+t.dataset.cl], o => { o.label = t.value; o.set_label = true; }); t.classList.add("set"); schedulePreview(); } });
 function setKind(c, k) { c.kind = k; c.set_kind = true;
   if (!isMetric(k)) { c.highlight = false; c.set_hl = c.set_hl || c.hl0; }
   else if (["delta", "delta_pct"].includes(k) && !c.highlight) { c.highlight = true; c.set_hl = true; } }
@@ -752,14 +917,18 @@ $("#cb-clear").onclick = () => { pickC.clear(); renderCols(); };
 $("#cb-apply").onclick = () => {
   const k = $("#cb-kind").value, hl = $("#cb-hl").value, lb = $("#cb-label").value.trim(); let n = 0;
   pickC.forEach(i => { const c = D.columns[i]; n++;
-    if (k && !c.formula) setKind(c, k);
-    if (hl !== "" && isMetric(c.kind)) { c.highlight = hl === "1"; c.set_hl = true; }
-    if (lb && !c.formula) { c.label = lb; c.set_label = true; } });
+    edit(c, o => {
+      if (k && !c.formula) setKind(o, k);
+      if (hl !== "" && isMetric(o.kind)) { o.highlight = hl === "1"; o.set_hl = true; }
+      if (lb && !c.formula) { o.label = lb; o.set_label = true; } }); });
   $("#cb-kind").value = ""; $("#cb-hl").value = ""; $("#cb-label").value = "";
   status(`Применено к ${n} колонкам.`); renderCols(); schedulePreview(); };
-$("#cb-reset").onclick = () => { pickC.forEach(i => { const c = D.columns[i];
-    c.kind = c.kind0; c.label = c.label0; c.highlight = c.hl0; c.set_kind = false; c.set_label = false; c.set_hl = false; });
-  status("Выбранные колонки — снова на автоматике (после «Собрать» распознаются заново)."); renderCols(); schedulePreview(); };
+$("#cb-reset").onclick = () => { const fs = scopeFiles();
+  pickC.forEach(i => { const c = D.columns[i];
+    if (fs) fs.forEach(f => delete f.colrules[c.name]);
+    else { c.kind = c.kind0; c.label = c.label0; c.highlight = c.hl0; c.set_kind = false; c.set_label = false; c.set_hl = false; } });
+  status(fs ? "У выбранных колонок в этих файлах — снова общие настройки." : "Выбранные колонки — снова на автоматике (после «Собрать» распознаются заново).");
+  renderCols(); schedulePreview(); };
 
 // ---------- файлы
 function visibleFiles() {
@@ -824,14 +993,15 @@ function renderBroken() { $("#broken").innerHTML = D.broken.length ? `<p class="
 function payload(extra) { return Object.assign({folder: D.folder, out: $("#out").value.trim(),
   book: {title: $("#title").value, subtitle: $("#subtitle").value, period: $("#period").value,
          positive_is: document.querySelector("input[name=grow]:checked").value, palette: document.querySelector("input[name=pal]:checked").value},
-  columns: D.columns, files: D.files}, extra || {}); }
+  columns: D.columns, files: D.files, template: D.template || ""}, extra || {}); }
 function openPreview(file) { pvFile = file; $("#prev").classList.remove("hidden"); $("#layout").classList.add("with-preview"); loadPreview(); }
 $("#pv-close").onclick = () => { pvFile = null; $("#prev").classList.add("hidden"); $("#layout").classList.remove("with-preview"); };
 $("#pv-refresh").onclick = () => loadPreview();
 let pvTimer = null;
 function schedulePreview() { if (!pvFile) return; clearTimeout(pvTimer); pvTimer = setTimeout(loadPreview, 500); }
 function previewIf(i) { if (pvFile === D.files[i].file) schedulePreview(); }
-$("#c-file").addEventListener("change", () => { if ($("#c-file").value) openPreview($("#c-file").value); });
+$("#c-file").addEventListener("change", () => { const v = $("#c-file").value; pickC.clear(); renderCols();
+  if (v.startsWith("f:")) openPreview(v.slice(2)); else if (v.startsWith("g:")) { const fs = scopeFiles(); if (fs.length) openPreview(fs[0].file); } });
 async function loadPreview() {
   if (!pvFile) return; $("#pv-name").textContent = "Предпросмотр: " + pvFile;
   try { const p = await api("/api/preview", payload({file: pvFile}));
@@ -843,9 +1013,16 @@ async function loadPreview() {
 }
 
 // ---------- сборка
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 $("#build").onclick = async () => {
-  $("#build").disabled = true; status("Собираю книгу… на больших файлах это может занять минуты.");
-  try { const j = await api("/api/build", payload());
+  $("#build").disabled = true; status("Собираю книгу…"); const pr = $("#prog"); pr.value = 0; pr.classList.remove("hidden");
+  try { const {job} = await api("/api/build", payload()); let st;
+    while (true) { st = await api("/api/job", {job});
+      if (st.total) { pr.max = st.total; pr.value = Math.min(st.done, st.total); }
+      if (!st.running) break;
+      status(st.total ? `Собираю: ${Math.min(st.done, st.total)} из ${st.total}${st.current ? " — " + st.current : ""}` : "Сохраняю настройки…");
+      await sleep(400); }
+    const j = st.result;
     $("#result").innerHTML = `<h2 style="font:700 16px Arial;color:var(--title);margin:16px 0 6px">Результат</h2>${j.ok ? `<div class="msg ok">Готово: ${esc(j.out)}</div>
       <div style="display:flex;gap:8px"><button type="button" class="primary" id="openBook">Открыть книгу</button><button type="button" id="openDir">Открыть папку</button></div>`
       : `<div class="msg err">Книга не собрана — причина в журнале.</div>`}<pre class="log">${esc(j.log)}</pre>`;
@@ -853,7 +1030,7 @@ $("#build").onclick = async () => {
                 $("#openDir").onclick = () => api("/api/open", {what: "folder"}).catch(e => status(e.message)); }
     status(j.ok ? "Книга собрана. Настройки сохранены в report.yaml в папке с CSV." : "Не получилось — см. журнал.");
     $("#result").scrollIntoView({block: "start"}); }
-  catch (e) { status(e.message); } finally { $("#build").disabled = false; }
+  catch (e) { status(e.message); } finally { $("#build").disabled = false; pr.classList.add("hidden"); }
 };
 </script>
 </body>
@@ -862,6 +1039,9 @@ $("#build").onclick = async () => {
 
 
 if __name__ == "__main__":
+    if "--pick-folder" in sys.argv:            # окно выбора папки в отдельном процессе (нужно для exe)
+        exec(PICK_CODE)
+        sys.exit()
     ap = argparse.ArgumentParser(description="Отчёт-мейкер: Excel-книга из папки CSV любой структуры (локально)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="не открывать браузер автоматически")

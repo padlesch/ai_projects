@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 *.rejected.txt
 .worktrees/
+csv_report_builder/build/
+csv_report_builder/dist/
+csv_report_builder/*.spec
