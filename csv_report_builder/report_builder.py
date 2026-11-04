@@ -294,6 +294,14 @@ def decode_bytes(raw):
     raise ValueError("не удалось определить кодировку")
 
 
+SINGLE_COLUMN = "\x1f"                    # разделитель, которого нет в тексте: весь файл — одна колонка
+DECIMAL_LINE = re.compile(r"^\s*\"?-?[\d\s\u00a0]+,\d+\s*%?\"?\s*$")
+
+
+def sep_name(sep):
+    return {SINGLE_COLUMN: "нет (одна колонка)", "\t": "TAB"}.get(sep, f"«{sep}»")
+
+
 def detect_sep(text):
     """Разделитель — тот, что даёт одинаковое число полей (>1) в большинстве первых строк; кавычки учитываются."""
     lines = [ln for ln in text.splitlines()[:200] if ln.strip()][:60]
@@ -306,10 +314,21 @@ def detect_sep(text):
         score = (int(mode > 1), counts.count(mode) / len(counts), mode)
         if score > best_score:
             best, best_score = sep, score
+    # «55723,69» в каждой строке — это десятичная запятая в файле из одной колонки, а не два поля
+    # но «0,397» / «310,427» при шапке «Случаи 2026,Случаи 2025» — две колонки целых: запятая в шапке без
+    # пробела (имена колонок) и разная длина «дробной части» — признаки разделителя
+    if best == "," and len(lines) > 1:
+        decimal = [ln for ln in lines[1:] if DECIMAL_LINE.match(ln)]
+        head = lines[0]
+        head_is_text = "," not in head or re.search(r",\s", head) and not re.search(r",\S", head)
+        tails = {len(ln.strip().strip('"').rstrip("%").split(",")[-1]) for ln in decimal}
+        if (len(decimal) >= 0.9 * (len(lines) - 1) and not any(ch in head for ch in ";\t|")
+                and head_is_text and len(tails) == 1):
+            return SINGLE_COLUMN
     return best
 
 
-def read_csv_any(path):
+def read_csv_any(path, sep=None):
     """-> (DataFrame строк, кодировка, разделитель, замечания). Все значения — строки, пустые — ''.
     Разбор сам (модуль csv): кавычки и переносы внутри поля, пустые строки пропускаются, короткие строки
     дополняются, лишние поля — в колонки «Колонка N» (с замечанием), пустые/повторяющиеся имена колонок —
@@ -320,13 +339,18 @@ def read_csv_any(path):
     text = text.lstrip("\ufeff")
     if not text.strip():
         raise ValueError("пустой файл")
-    sep = detect_sep(text)
-    rows = [r for r in csv.reader(_lines(text), delimiter=sep)
-            if any(v.strip() for v in r)]
-    if not rows:
+    sep = {"tab": "\t", "none": SINGLE_COLUMN}.get(str(sep).lower(), sep) if sep else detect_sep(text)
+    rows = list(csv.reader(_lines(text), delimiter=sep))
+    filled = [r for r in rows if any(v.strip() for v in r)]
+    if not filled:
         raise ValueError("пустой файл")
-    header, body = rows[0], rows[1:]
+    header = filled[0]
+    start = next(i for i, r in enumerate(rows) if r is header or r == header) + 1
+    body = [r for r in rows[start:] if any(v.strip() for v in r)]
     notes = []
+    blank = sum(1 for r in rows[start:] if r and not any(v.strip() for v in r))
+    if blank:
+        notes.append(f"{blank} полностью пустых строк(и) пропущено")
     width = max([len(header)] + [len(r) for r in body])
     extra = [r for r in body if len(r) > len(header) and any(v.strip() for v in r[len(header):])]
     if extra:
@@ -634,9 +658,12 @@ class Report:
 
 
 def prepare(path, file_name, fc, period):
-    df, encoding, sep, notes = read_csv_any(path)
+    df, encoding, sep, notes = read_csv_any(path, fc.get("sep"))
+    if sep == SINGLE_COLUMN and not fc.get("sep"):
+        notes.append("запятая принята за десятичную, файл — одна колонка (если это разделитель: files: "
+                     f"{{\"{file_name}\": {{sep: \",\"}}}} в report.yaml)")
     if df.empty:
-        raise ValueError("нет строк (только шапка)")
+        raise ValueError("нет данных (только шапка или пустые строки)")
     rules = fc["columns"]
     table = fc["table"]
     cols = []
@@ -646,8 +673,7 @@ def prepare(path, file_name, fc, period):
         if c.role != "skip":
             cols.append(c)
     source_columns = list(cols)
-    if not any(c.is_metric for c in cols):
-        print(f"   [!] {file_name}: числовых колонок-метрик не найдено — лист без раскраски и итогов")
+    no_metrics = not any(c.is_metric for c in cols)
     level = next((c for c in cols if c.role == "level"), None)
     if level is not None and any(v is None for v in level.values):
         level.role = "dimension"
@@ -656,6 +682,8 @@ def prepare(path, file_name, fc, period):
     rep.file, rep.encoding, rep.sep = file_name, encoding, sep
     rep.source_columns = source_columns
     rep.notes = notes + [n for c in cols for n in c.notes]
+    if no_metrics:
+        rep.notes.append("числовых колонок нет — таблица без итогов и раскраски")
     rep.hierarchy = level is not None
     rep.n_rows = len(df)
     if rep.n_rows > EXCEL_MAX_ROWS - 20:
@@ -705,6 +733,8 @@ def prepare(path, file_name, fc, period):
     rep.table = table
     rn = table.get("row_numbers", "auto")
     rep.row_numbers = rep.hierarchy if rn == "auto" else bool(rn)
+    if rn == "auto" and not rep.hierarchy and rep.columns and all(c.is_metric for c in rep.columns):
+        rep.row_numbers = True    # одни метрики — колонка «№» нужна, чтобы было где подписать «Итого»
     return rep
 
 
@@ -1138,6 +1168,9 @@ def write_sheet(ws, rep, fc, cfg, st):
             cell.fill = st.fill(P["total"])
             cell.border = DATA_BORDER
             cell.alignment = st.align("center")
+        if not rep.row_numbers:   # подпись — в первую свободную ячейку (первая колонка может быть метрикой)
+            label_col = next((col_idx[id(c)] for c in cols if ws.cell(total_row, col_idx[id(c)]).value is None),
+                             label_col)
         cell = ws.cell(total_row, label_col)
         if cell.value is None:
             cell.value = "Итого (по видимым строкам)" if live else "Итого"
@@ -1455,7 +1488,7 @@ def build(src_dir, cfg, out_path, explain=False):
         roles = ", ".join(f"{c.name}={c.role}{'/' + c.kind if c.is_metric else ''}{'(+)' if c.formula else ''}"
                           for c in rep.columns)
         if explain:
-            print(f"[{'иерархия' if rep.hierarchy else 'таблица '}] {f}  ({rep.encoding}, '{rep.sep}', строк {rep.n_rows})")
+            print(f"[{'иерархия' if rep.hierarchy else 'таблица '}] {f}  ({rep.encoding}, разделитель {sep_name(rep.sep)}, строк {rep.n_rows})")
             print(f"     {roles}")
             continue
         name = sheet_title(fc.get("sheet") or (f"{no} {rest}" if no else rest), used)
@@ -1639,6 +1672,7 @@ def write_help(ws, rows, st, style):
 
 
 # ---------------------------------------------------------------- уточняющие вопросы
+WIDE_COLUMNS = 30                        # шире — в вопросах сводка вместо полной таблицы колонок
 TECH_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$|^[A-Z][A-Z0-9]{2,}$")
 class Asker:
     """Вопрос в консоли: Enter — вариант в скобках, «!» — принять все остальные варианты по умолчанию."""
@@ -1711,6 +1745,26 @@ def describe(c):
     if c.role == "dimension" and c.kind in ("date", "datetime"):
         return KIND_RU[c.kind]
     return ROLE_RU.get(c.role, c.role)
+
+
+def column_flags(c, columns_rules=None):
+    flags = []
+    if c.formula:
+        flags.append("добавлена скриптом")
+    if c.kind_source == "values":
+        flags.append("вид угадан по цифрам — проверьте")
+    if c.maybe_code:
+        flags.append("все значения разные — похоже на код")
+    if not c.is_metric and 0.5 <= c.numeric_share < 0.98:
+        flags.append(f"{c.numeric_share:.0%} чисел, есть текст: «{c.odd_value}» — может, метрика?")
+    return flags
+
+
+def doubts(rep, columns_rules):
+    """Колонки, о которых скрипт не уверен (без «добавлена скриптом»), и технические имена без подписи."""
+    unsure = [c for c in rep.columns if [f for f in column_flags(c) if f != "добавлена скриптом"]]
+    tech = [c for c in rep.columns if TECH_NAME.match(c.name) and not rules_for(columns_rules, c.name).get("label")]
+    return unsure, tech
 
 
 def parse_numbers(text, upper):
@@ -1809,8 +1863,28 @@ def interview(src_dir, cfg, raw, asker, force=False):
 
     columns = raw.setdefault("columns", {})
     files = raw.setdefault("files", {})
-    for k, items in enumerate(plan["todo"], start=1):
-        ask_structure(asker, k, len(plan["todo"]), items, columns, files)
+    todo = plan["todo"]
+    if len(todo) > 1:
+        out(f"\n— Структуры файлов: {len(todo)} —")
+        for k, items in enumerate(todo, start=1):
+            r = items[0][1]
+            unsure, tech = doubts(r, columns)
+            n_metric = sum(1 for c in r.columns if c.is_metric and not c.formula)
+            what = (f"сомнения: {len(unsure)} кол." if unsure else "") + \
+                   (f"{'; ' if unsure else ''}тех. имена: {len(tech)}" if tech else "")
+            out(f"  {k:>3}. {len(items)} файл(ов), колонок {len(r.source_columns)}, метрик {n_metric}"
+                f"{', иерархия' if r.hierarchy else ''} — {what or 'распознано уверенно'}  ({items[0][0]}"
+                f"{' …' if len(items) > 1 else ''})")
+        n_doubt = sum(1 for items in todo if any(doubts(items[0][1], columns)))
+        mode = asker.choice("Какие структуры проверить вручную?",
+                            [("doubt", f"только с сомнениями ({n_doubt} из {len(todo)})"),
+                             ("all", "все"), ("none", "ни одной — принять, как распознано")], "doubt")
+        if mode == "doubt":
+            todo = [items for items in todo if any(doubts(items[0][1], columns))]
+        elif mode == "none":
+            todo = []
+    for k, items in enumerate(todo, start=1):
+        ask_structure(asker, k, len(todo), items, columns, files)
     todo = {f for items in plan["todo"] for f, _ in items}
     ask_sheet_names(asker, [(f, r) for f, r in plan["reports"] if f in todo], files)
     return raw, True
@@ -1824,25 +1898,47 @@ def ask_structure(asker, k, total, items, columns, files):
     out(f"\n— Структура {k} из {total}: {len(items)} файл(ов) — {shown_files}")
     out(f"  {'иерархия (колонка «Уровень»)' if rep.hierarchy else 'плоская таблица'}, строк в первом файле: {rep.n_rows}")
     cols = rep.columns
-    for i, c in enumerate(cols, start=1):
-        flags = []
-        if c.formula:
-            flags.append("добавлена скриптом")
-        if c.kind_source == "values":
-            flags.append("вид угадан по цифрам — проверьте")
-        if c.maybe_code:
-            flags.append("все значения разные — похоже на код")
-        if not c.is_metric and 0.5 <= c.numeric_share < 0.98:
-            flags.append(f"{c.numeric_share:.0%} чисел, есть текст: «{c.odd_value}» — может, метрика?")
+
+    def line(i, c):
         sample = ", ".join(map(str, c.sample[:2]))
         shown = c.name if c.label in (c.name, c.base) or c.formula else f"{c.name} -> «{c.label}»"
-        out(f"  {i:>3}. {shown[:38]:<38} {describe(c):<16} {sample[:26]:<26} {'; '.join(flags)}")
+        out(f"  {i:>3}. {shown[:38]:<38} {describe(c):<16} {sample[:26]:<26} {'; '.join(column_flags(c))}")
+
+    if len(cols) <= WIDE_COLUMNS:
+        for i, c in enumerate(cols, start=1):
+            line(i, c)
+    else:                      # широкий файл: сводка по видам и только сомнительные колонки
+        counts = {}
+        for c in cols:
+            counts[describe(c)] = counts.get(describe(c), 0) + 1
+        out(f"  колонок {len(cols)}: " + ", ".join(f"{k} — {v}" for k, v in counts.items()))
+        unsure, _ = doubts(rep, columns)
+        if unsure:
+            out("  сомнительные колонки (номера — сквозные):")
+            for c in unsure:
+                line(cols.index(c) + 1, c)
+        if asker.choice("Показать все колонки?", [("no", "нет"), ("yes", "да")], "no") == "yes":
+            for i, c in enumerate(cols, start=1):
+                line(i, c)
 
     # 1. вид колонок
     editable = [c for c in cols if not c.formula and c.role not in ("level", "name", "subrow")]
-    chosen = ask_numbers(asker, "Изменить вид колонок? Номера через запятую (2,5 или 3-6), Enter — всё верно",
-                         len(cols), "всё верно")
-    for i in chosen or []:
+    unsure = [c for c in doubts(rep, columns)[0] if c in editable]
+    hint = ", * — все сомнительные одним видом" if len(unsure) > 1 else ""
+    while True:
+        answer = asker._read(f"Изменить вид колонок? Номера через запятую (2,5 или 3-6){hint}, Enter — всё верно "
+                             "[всё верно]: ").strip()
+        if answer == "*" and hint:
+            kind = asker.choice(f"Вид для всех сомнительных ({len(unsure)}):", KIND_CHOICES, unsure[0].kind)
+            set_kind(columns, unsure, kind)
+            chosen = []
+            break
+        try:
+            chosen = parse_numbers(answer, len(cols)) if answer else []
+            break
+        except ValueError as err:
+            out(f"   не понял «{err}»: номера от 1 до {len(cols)} через запятую или диапазон 2-5")
+    for i in chosen:
         c = cols[i - 1]
         if c not in editable:
             out(f"   «{c.label}»: {'добавлена скриптом — меняется через исходные колонки' if c.formula else 'служебная роль, не меняется'}")
@@ -1852,21 +1948,15 @@ def ask_structure(asker, k, total, items, columns, files):
         also = [x.name for x in siblings if x is not c]
         kind = asker.choice(f"«{c.name}» (например: {', '.join(map(str, c.sample))})"
                             + (f" — то же для: {', '.join(also)}" if also else "") + ":", KIND_CHOICES, current)
-        for x in siblings:          # «Сумма 2026» и «Сумма 2025» — одного вида
-            rule = columns.setdefault(x.name, {})
-            for key in ("kind", "role"):
-                rule.pop(key, None)
-            if kind in ("dimension", "skip"):
-                rule["role"] = kind
-            else:
-                rule.update({"role": "metric", "kind": kind})
+        set_kind(columns, siblings, kind)       # «Сумма 2026» и «Сумма 2025» — одного вида
 
     # 2. подсветка
     per_file = {}
     metric_idx = [i for i, c in enumerate(cols, start=1) if c.is_metric]
     default_hl = [i for i, c in enumerate(cols, start=1) if c.is_metric and c.kind in ("delta", "delta_pct")]
     if metric_idx:
-        default_text = ("Δ и Δ%: " + ",".join(map(str, default_hl))) if default_hl else "ничего"
+        default_text = (("Δ и Δ%: " + ",".join(map(str, default_hl))) if len(default_hl) <= 8
+                        else f"все Δ и Δ% ({len(default_hl)} шт.)") if default_hl else "ничего"
         hl = ask_numbers(asker, "Что подсвечивать шкалой «рост / снижение»? Номера, 0 — ничего", len(cols), default_text)
         if hl is not None and hl != default_hl:
             if hl:
@@ -1904,6 +1994,17 @@ def ask_structure(asker, k, total, items, columns, files):
             f"  {c.name} (например: {', '.join(map(str, c.sample[:3]))})", c.name)
     for f, _ in items:
         files[f] = deep_merge(files.get(f) or {}, per_file)
+
+
+def set_kind(columns, cols, kind):
+    for x in cols:
+        rule = columns.setdefault(x.name, {})
+        for key in ("kind", "role"):
+            rule.pop(key, None)
+        if kind in ("dimension", "skip"):
+            rule["role"] = kind
+        else:
+            rule.update({"role": "metric", "kind": kind})
 
 
 def ask_sheet_names(asker, items, files):
@@ -2009,7 +2110,7 @@ def write_template(src_dir, cfg, path):
         try:
             rep = prepare(os.path.join(src_dir, f), f, fc, cfg["book"].get("period") or "")
             kind = "иерархия по «Уровень»" if rep.hierarchy else "плоская таблица"
-            lines.append(f"    # {kind}; строк {rep.n_rows}; {rep.encoding}, разделитель {rep.sep!r}")
+            lines.append(f"    # {kind}; строк {rep.n_rows}; {rep.encoding}, разделитель {sep_name(rep.sep)}")
             lines.append("    # метрики: " + (", ".join(f"{c.name} [{c.kind}{', добавлено' if c.formula else ''}]"
                                                 for c in rep.metrics) or "нет"))
             dims = [c.name for c in rep.columns if not c.is_metric]

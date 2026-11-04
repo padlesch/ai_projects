@@ -295,3 +295,80 @@ def test_many_files_and_no_files(tmp_path):
     empty.mkdir()
     with pytest.raises(SystemExit):
         build(empty)
+
+
+# ---------------------------------------------------------------- разнородные папки и широкие файлы
+def test_single_column_decimal_vs_two_integer_columns(tmp_path):
+    write_raw(tmp_path / "a.csv", "Оплата, руб\n55723,69\n46968,05\n98045,98\n")
+    df, _, sep, _ = R.read_csv_any(str(tmp_path / "a.csv"))
+    assert sep == R.SINGLE_COLUMN and df.columns.tolist() == ["Оплата, руб"] and df.iloc[0, 0] == "55723,69"
+    write_raw(tmp_path / "b.csv", "Случаи 2026,Случаи 2025\n0,397\n310,427\n57,494\n")
+    df, _, sep, _ = R.read_csv_any(str(tmp_path / "b.csv"))
+    assert sep == "," and df.shape == (3, 2)
+    df, _, sep, _ = R.read_csv_any(str(tmp_path / "a.csv"), sep=",")       # ручная настройка files.sep
+    assert df.shape == (3, 2)
+
+
+def test_blank_rows_skipped_with_note(tmp_path):
+    write_raw(tmp_path / "x.csv", 'Отделение\n""\nХирургия\n""\n')
+    df, _, _, notes = R.read_csv_any(str(tmp_path / "x.csv"))
+    assert df.iloc[:, 0].tolist() == ["Хирургия"] and any("2 полностью пустых" in n for n in notes)
+
+
+def test_totals_label_when_first_column_is_metric(tmp_path):
+    write_raw(tmp_path / "x.csv", "Значение;Комментарий\n1;\n2;а\n")
+    ws = build(tmp_path).worksheets[1]
+    assert [ws.cell(6, c).value for c in (1, 2)] == [3, "Итого"]
+    write_raw(tmp_path / "x.csv", "Случаи;Сумма\n1;2\n")               # одни метрики — подпись в колонке «№»
+    ws = build(tmp_path).worksheets[1]
+    assert ws.cell(6, 1).value == "Итого"
+
+
+def mixed_folder(tmp_path):
+    write_raw(tmp_path / "ref.csv", "Код;Название\n001;Альфа\n002;Бета\n")                       # без метрик
+    write_raw(tmp_path / "sum.csv", "Регион;Случаи 2026;Случаи 2025\nМосква;5;4\n")              # уверенно
+    head = ["Регион"] + [f"Показатель {i}" for i in range(60)] + [f"Сумма {i}" for i in range(10)]
+    rows = [["Р1"] + [str(i * 7 + j) for j in range(60)] + ["1,5"] * 10 for i in range(6)]
+    write_csv(tmp_path / "wide.csv", head, rows, encoding="utf-8")                              # 60 сомнительных
+
+
+def test_review_only_doubtful_structures(tmp_path):
+    mixed_folder(tmp_path)
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    said = []
+    it = iter(["", "", "", "",              # книга: заголовок, подзаголовок, период, рост
+               "",                          # какие структуры проверять — только с сомнениями
+               "",                          # wide.csv: показать все колонки — нет
+               "*", "3",                    # все сомнительные -> «другое число»
+               "!"])
+    asker = R.Asker(inp=lambda p: next(it, ""), out=lambda *a: said.append(" ".join(map(str, a))))
+    raw, _ = R.interview(str(tmp_path), cfg, {}, asker)
+    text = "\n".join(said)
+    assert "— Структуры файлов: 3 —" in text and "только с сомнениями (1 из 3)" in text
+    assert "Структура 1 из 1: 1 файл(ов) — wide.csv" in text
+    assert "колонок 71:" in text                                   # широкий файл — сводка, не 71 строка
+    assert raw["columns"]["Показатель 0"] == {"role": "metric", "kind": "number"}     # «*» -> «другое число»
+    assert raw["columns"]["Показатель 59"]["kind"] == "number"
+    assert set(raw["files"]) == {"ref.csv", "sum.csv", "wide.csv"}  # имена листов — у всех
+
+
+def test_random_folders_keep_every_row(tmp_path):
+    rnd = __import__("random").Random(5)
+    gens = [lambda: rnd.choice(["Москва", "", "a;b", 'ООО "Р"']), lambda: f"{rnd.randint(0, 999):05d}",
+            lambda: str(rnd.randint(-5, 900)), lambda: f"{rnd.uniform(-9, 9999):.2f}".replace(".", ","),
+            lambda: f"{rnd.randint(1, 28):02d}.03.2026", lambda: rnd.choice(["1", "н/д"]), lambda: ""]
+    expected = {}
+    for k in range(30):
+        ncol = rnd.choice([1, 2, 3, 5, 9, 20, 45, 120])
+        kinds = [rnd.randrange(len(gens)) for _ in range(ncol)]
+        rows = [[gens[g]() for g in kinds] for _ in range(rnd.choice([1, 3, 25]))]
+        rows = [r for r in rows if any(r)] or [["x"] + [""] * (ncol - 1)]
+        write_csv(tmp_path / f"f{k}.csv", [f"К{i}" for i in range(ncol)], rows,
+                  encoding=rnd.choice(["utf-8", "cp1251"]), sep=rnd.choice([";", "\t"]))
+        expected[f"f{k}.csv"] = len(rows)
+    wb = build(tmp_path)
+    toc = {r[8]: r[1] for r in wb[R.TOC_SHEET].iter_rows(values_only=True) if r and len(r) > 8 and r[8]}
+    assert set(toc) >= set(expected)
+    for f, n in expected.items():
+        ws = wb[toc[f]]
+        assert ws.max_row >= 6 + n                                 # шапка + данные; ничего не потеряно
