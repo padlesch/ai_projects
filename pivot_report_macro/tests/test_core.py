@@ -299,6 +299,67 @@ def run_cols(b):
             print(f'FAIL столбцы {n}: ждали {exp}, вышло {got}')
             print('   ', [l.split(RS) for l in o.split('\n') if l])
     print(f'столбцы: {len(tests) - fails}/{len(tests)} кейсов прошли')
+    return fails + run_cols_sheet(b)
+
+
+def sheet_case(rows, clt, meas, typed):
+    nC = len(rows[0])
+    head = RS.join([str(nC), str(len(rows)), str(len(meas))] + meas)
+    lines = [head]
+    for r, row in enumerate(rows):
+        cells = []
+        for j, t in enumerate(row):
+            if not typed:
+                ct = -1
+            elif not t:
+                ct = -1
+            elif clt[j] == 2:
+                ct = CT_GRAND
+            elif clt[j] == 1:
+                ct = CT_SUB
+            elif t in meas:
+                ct = 4
+            else:
+                ct = CT_ITEM
+            cells.append(US.join([t, str(ct)]))
+        lines.append(RS.join(cells))
+    lines.append(RS.join(str(x if typed else -1) for x in clt))
+    return '\n'.join(lines)
+
+
+def run_cols_sheet(b):
+    # шапка как на листе: ожидаемый порядок столбцов и подписи уровней
+    A = ([['2023', '', '2023 Итог', '2024', '2024 Итог', 'Общий итог'],
+          ['Янв', 'Фев', '', 'Янв', '', '']], [0, 0, 1, 0, 1, 2], ['Сумма'],
+         [6, 3, 1, 2, 5, 4],
+         {1: ['2023', 'Янв'], 3: ['2023', 'Итог'], 4: ['2024', 'Янв'], 6: ['Общий итог', '']})
+    C = ([['2023', '', '2024', '', 'Итог Сумма X', 'Итог Сумма Y'],
+          ['Сумма X', 'Сумма Y', 'Сумма X', 'Сумма Y', '', '']], [0, 0, 0, 0, 2, 2], ['Сумма X', 'Сумма Y'],
+         [5, 1, 3, 6, 2, 4],
+         {1: ['Сумма X', '2023'], 2: ['Сумма Y', '2023'], 5: ['Сумма X', 'Общий итог'], 6: ['Сумма Y', 'Общий итог']})
+    # меры сверху, первый элемент пустой (как в модели данных пользователя)
+    R = ([['дельта', '', '', 'сумма', '', ''],
+          ['', 'Другое', 'Основные', '', 'Другое', 'Основные']], [0] * 6, ['дельта', 'сумма'],
+         [1, 2, 3, 4, 5, 6],
+         {1: ['дельта', ''], 2: ['дельта', 'Другое'], 4: ['сумма', ''], 6: ['сумма', 'Основные']})
+    tests = []
+    for name, (rows, clt, meas, order, labels) in (('годы', A), ('меры внизу', C), ('меры сверху, пустой элемент', R)):
+        for typed in (True, False):
+            tests.append((f'{name}, типы {"известны" if typed else "неизвестны"}', sheet_case(rows, clt, meas, typed), order, labels))
+    out = b.call('ТестШапкиЛист', GS.join(t[1] for t in tests)).split(GS)
+    fails = 0
+    for (name, _, order, labels), o in zip(tests, out):
+        got = [l.split(RS) for l in o.split('\n') if l]
+        got_order = [int(x[0]) for x in got]
+        lab = {int(x[0]): x[1:] for x in got}
+        bad = got_order != order or any(lab.get(k) != v for k, v in labels.items())
+        if bad:
+            fails += 1
+            print(f'FAIL шапка «{name}»: порядок {got_order} (ждали {order})')
+            for k, v in labels.items():
+                if lab.get(k) != v:
+                    print(f'    столбец {k}: {lab.get(k)} (ждали {v})')
+    print(f'шапка по листу: {len(tests) - fails}/{len(tests)} кейсов прошли')
     return fails
 
 

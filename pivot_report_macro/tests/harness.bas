@@ -117,3 +117,44 @@ Private Function ОдинСтолбцы(ByVal s As String) As String
     Next ci
     ОдинСтолбцы = r
 End Function
+
+' ---------- шапка по листу ----------
+Public Function ТестШапкиЛист(ByVal все As String) As String
+    Dim кейсы, c As Long, out As String
+    кейсы = Split(все, Chr(29))
+    For c = 0 To UBound(кейсы)
+        If Len(кейсы(c)) > 0 Then out = out & ОднаШапка(кейсы(c)) & Chr(29)
+    Next c
+    ТестШапкиЛист = out
+End Function
+
+Private Function ОднаШапка(ByVal s As String) As String
+    Dim стр, f, g, r As Long, j As Long, k As Long, ci As Long, res As String
+    стр = Split(s, Chr(10))
+    f = Split(стр(0), Chr(30))
+    nC = CLng(f(0)): nHR = CLng(f(1)): nMeas = CLng(f(2))
+    ReDim mMeas(1 To Макс(nMeas, 1))
+    For k = 1 To nMeas: mMeas(k) = f(2 + k): Next k
+    mСлужебные = "|значения|"
+    ReDim hTxt(1 To nHR, 1 To nC): ReDim hCT(1 To nHR, 1 To nC): ReDim inCLT(1 To nC)
+    For r = 1 To nHR
+        g = Split(стр(r), Chr(30))
+        For j = 1 To nC
+            hTxt(r, j) = Split(g(j - 1), Chr(31))(0)
+            hCT(r, j) = CLng(Split(g(j - 1), Chr(31))(1))
+        Next j
+    Next r
+    g = Split(стр(nHR + 1), Chr(30))
+    For j = 1 To nC: inCLT(j) = CLng(g(j - 1)): Next j
+    ШапкаПоЛисту
+    СобратьШапку
+    ПорядокСтолбцов
+    For ci = 1 To nCOrd
+        res = res & cOrd(ci)
+        For k = 1 To nLev
+            res = res & Chr(30) & dLev(cOrd(ci), k)
+        Next k
+        res = res & Chr(10)
+    Next ci
+    ОднаШапка = res
+End Function

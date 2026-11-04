@@ -113,6 +113,11 @@ Private nCOrd As Long
 Private mGrandTxt As String       ' как общий итог назван в самой сводной
 Private mѕоѕол€м As Boolean       ' уровни вз€ты по пол€м сводной, а не по месту
 Private m—лот() As Long           ' место (столбец*1000+отступ) каждого уровн€
+Private nHR As Long               ' строк шапки столбцов над значени€ми
+Private hTxt() As String          ' (строка шапки, столбец) Ч текст на листе
+Private hCT() As Long             ' (строка шапки, столбец) Ч тип €чейки сводной
+Private inCLT() As Long           ' тип столбца из оси сводной, -1 Ч неизвестен
+Private m—лужебные As String      ' |подписи полей|Ђ«начени€ї| Ч не уровни шапки
 '#ƒ≈ Ћ- ќЌ≈÷
 
 Private mLblCap() As String       ' подписи столбцов с уровн€ми строк
@@ -794,62 +799,68 @@ Private Sub —н€ть‘орматы(db As Range)
     On Error GoTo 0
 End Sub
 
-' "–егион: —евер; √од: 2024" Ч значени€ фильтров сводной
+' "–егион: —евер;   √од: 2024" Ч фильтры сводной, как они видны на листе:
+' подпись фильтра и значение в соседней клетке (ЂAllї, Ђ(несколько
+' элементов)ї, выбранный элемент). ‘ильтры Ђвсеї не пишем.
 Private Function “екст‘ильтров(pt As PivotTable) As String
-    Dim pf As PivotField, s As String, t As String, n As Long
+    Dim pf As PivotField, s As String, t As String, им€ As String
+    Dim стр() As Long, txt() As String, n As Long, i As Long, j As Long, rr As Long, tt As String
     On Error Resume Next
     n = pt.PageFields.Count
     If n = 0 Then Exit Function
+    ReDim стр(1 To n)
+    ReDim txt(1 To n)
+    n = 0
     For Each pf In pt.PageFields
-        t = ""
-        If pf.EnableMultiplePageItems Then
-            If Not ¬ыбранќдин(pf, t) Then t = "(несколько элементов)"
-        End If
-        If Len(t) = 0 Then
-            t = pf.CurrentPage.Caption
-            If Err.Number <> 0 Then Err.Clear: t = ""
-        End If
-        If Len(t) = 0 Then
-            t = „истое»м€(pf.CurrentPageName)
-            If Err.Number <> 0 Then Err.Clear: t = ""
-        End If
-        If Len(t) = 0 Then t = "(все)"
-        If LCase$(t) <> "(все)" And LCase$(t) <> "(all)" Then
-            If Len(s) > 0 Then s = s & ";   "
-            s = s & „истое»м€(pf.Caption) & ": " & „истое»м€(t)
-        End If
+        t = "": им€ = "": rr = 0
+        rr = pf.LabelRange.Row
+        им€ = Trim$(¬—троку(pf.LabelRange.Value))
+        If Len(им€) = 0 Then им€ = „истое»м€(pf.Caption)
+        t = Trim$(pf.LabelRange.Offset(0, 1).Text)
+        If Len(t) = 0 Then t = Trim$(„истое»м€(pf.CurrentPageName))
+        Err.Clear
+        Select Case LCase$(t)
+            Case "", "all", "(all)", "(все)", "все"
+            Case Else
+                n = n + 1
+                стр(n) = rr
+                txt(n) = им€ & ": " & t
+        End Select
     Next pf
     On Error GoTo 0
+    ' в том пор€дке, в каком фильтры сто€т на листе
+    For i = 2 To n
+        For j = i To 2 Step -1
+            If стр(j) < стр(j - 1) Then
+                rr = стр(j): стр(j) = стр(j - 1): стр(j - 1) = rr
+                tt = txt(j): txt(j) = txt(j - 1): txt(j - 1) = tt
+            End If
+        Next j
+    Next i
+    For i = 1 To n
+        If i > 1 Then s = s & ";   "
+        s = s & txt(i)
+    Next i
     “екст‘ильтров = s
 End Function
 
-Private Function ¬ыбранќдин(pf As PivotField, ByRef t As String) As Boolean
-    Dim it As PivotItem, n As Long, всего As Long
-    On Error GoTo Ќет
-    For Each it In pf.PivotItems
-        всего = всего + 1
-        If it.Visible Then n = n + 1: t = it.Caption
-    Next it
-    If n = всего Then t = "": ¬ыбранќдин = True: Exit Function   ' выбраны все
-    ¬ыбранќдин = (n = 1)
-    If Not ¬ыбранќдин Then t = ""
-    Exit Function
-Ќет:
-    t = ""
-End Function
-
-
 '--------------------------------------------------------------------------
-'  —толбцы: сн€тие оси столбцов
+'  —толбцы: шапка Ч с листа, тип столбца Ч из оси сводной
 '--------------------------------------------------------------------------
+' ѕодписи шапки берутс€ ровно такими, как они видны в сводной (с учЄтом
+' переименований): у сводных на модели данных объектна€ модель отдаЄт
+' подписи элементов пустыми или исходными. “ип столбца (обычный / итог /
+' промежуточный итог) надЄжно знает ось сводной Ч его берЄм оттуда.
 Private Sub —н€ть—толбцы(pt As PivotTable)
 
-    Dim ax As Object, ln As Object
-    Dim j As Long, k As Long, ok As Boolean, maxLev As Long, d As String
+    Dim ax As Object, j As Long, r As Long, ok As Boolean, ct As Long, i As Long
+    Dim cr As Range, db As Range, ws As Worksheet, верх As Long, cel As Range
+    Dim сл As String
 
     ReDim cType(1 To nC)
     ReDim cCnt(1 To nC)
     ReDim cDF(1 To nC)
+    ReDim inCLT(1 To nC)
     cMeasLev = 0
 
     nMeas = 0
@@ -866,80 +877,64 @@ Private Sub —н€ть—толбцы(pt As PivotTable)
     Err.Clear
     On Error GoTo 0
 
+    ' тип каждого столбца Ч из оси
     ok = False
     On Error Resume Next
     Set ax = pt.PivotColumnAxis
     If Not ax Is Nothing Then ok = (ax.PivotLines.Count = nC)
-    Err.Clear
-    On Error GoTo 0
-
-    If Not ok Then
-        —н€ть—толбцыѕоЋисту pt
-        Exit Sub
-    End If
-
-    maxLev = 1
-    On Error Resume Next
     For j = 1 To nC
-        cType(j) = ax.PivotLines(j).LineType
-        cCnt(j) = ax.PivotLines(j).PivotLineCells.Count
-        If cCnt(j) < 1 Then cCnt(j) = 1
-        If cCnt(j) > maxLev Then maxLev = cCnt(j)
+        inCLT(j) = -1
+        If ok Then
+            inCLT(j) = ax.PivotLines(j).LineType
+            If Err.Number <> 0 Then inCLT(j) = -1: Err.Clear
+        End If
     Next j
     Err.Clear
     On Error GoTo 0
 
-    ReDim cItem(1 To nC, 1 To maxLev)
+    ' строки шапки над областью значений
+    Set db = pt.DataBodyRange
+    Set ws = db.Worksheet
     On Error Resume Next
-    For j = 1 To nC
-        Set ln = ax.PivotLines(j)
-        For k = 1 To cCnt(j)
-            cItem(j, k) = “екстЁлемента(ln, k)
-            d = ""
-            d = »м€ћеры(ln.PivotLineCells(k).DataField)
-            If Err.Number <> 0 Then d = "": Err.Clear
-            If Len(d) > 0 Then
-                cDF(j) = d
-                ' уровень мер определ€ем только по полноразмерным лини€м
-                If cCnt(j) = maxLev And cMeasLev = 0 Then cMeasLev = k
+    Set cr = pt.ColumnRange
+    On Error GoTo 0
+    If cr Is Nothing Then верх = db.Row - 1 Else верх = cr.Row
+    If верх >= db.Row Then верх = db.Row - 1
+    If верх < 1 Then верх = 1
+    nHR = db.Row - верх
+    If nHR < 1 Then nHR = 1
+    ReDim hTxt(1 To nHR, 1 To nC)
+    ReDim hCT(1 To nHR, 1 To nC)
+    For r = 1 To nHR
+        For j = 1 To nC
+            hCT(r, j) = -1
+            If верх + r - 1 < db.Row Then
+                Set cel = ws.Cells(верх + r - 1, db.Column + j - 1)
+                hTxt(r, j) = Trim$(¬—троку(cel.Value))
+                ct = -1
+                On Error Resume Next
+                ct = cel.PivotCell.PivotCellType
+                If Err.Number <> 0 Then ct = -1: Err.Clear
+                On Error GoTo 0
+                hCT(r, j) = ct
             End If
-        Next k
-    Next j
+        Next j
+    Next r
+
+    ' надписи, которые уровнем шапки не €вл€ютс€: названи€ полей и Ђ«начени€ї
+    сл = "|названи€ столбцов|column labels|значени€|values|"
+    On Error Resume Next
+    сл = сл & LCase$(pt.DataPivotField.Caption) & "|"
+    For i = 1 To pt.ColumnFields.Count
+        сл = сл & LCase$(pt.ColumnFields(i).Caption) & "|"
+    Next i
     Err.Clear
     On Error GoTo 0
+    m—лужебные = сл
+
+    ЎапкаѕоЋисту
 
 End Sub
-
-' ѕодпись элемента оси Ч как она показана в сводной. Ёлементы и меры
-' можно переименовать пр€мо в сводной: мен€етс€ Caption, а внутреннее им€
-' (Name) остаЄтс€ исходным, поэтому сначала Caption, затем Name (у OLAP это
-' уникальное им€ вида [ginek].[ —— ѕ новый].&[ —] Ч берЄм последние скобки).
-Private Function “екстЁлемента(ln As Object, ByVal k As Long) As String
-    Dim s As String, pc As Object, ct As Long
-    On Error Resume Next
-    Err.Clear
-    Set pc = ln.PivotLineCells(k)
-    ct = -1
-    ct = pc.PivotCellType
-    If ct = CT_DATAFIELD Then
-        s = »м€ћеры(pc.DataField)
-        If Err.Number <> 0 Then s = "": Err.Clear
-        If Len(s) = 0 Then
-            s = Trim$(¬—троку(pc.Range.Cells(1, 1).Value))
-            If Err.Number <> 0 Then s = "": Err.Clear
-        End If
-    End If
-    If Len(s) = 0 Then
-        s = pc.PivotItem.Caption
-        If Err.Number <> 0 Then Err.Clear: s = ""
-    End If
-    If Len(s) = 0 Then
-        s = pc.PivotItem.Name
-        If Err.Number <> 0 Then Err.Clear: s = ""
-    End If
-    On Error GoTo 0
-    “екстЁлемента = „истое»м€(s)
-End Function
 
 ' Ќазвание меры, как оно показано в сводной (с учЄтом переименовани€)
 Private Function »м€ћеры(df As Object) As String
@@ -951,119 +946,6 @@ Private Function »м€ћеры(df As Object) As String
     On Error GoTo 0
     »м€ћеры = „истое»м€(s)
 End Function
-
-' «апасной разбор шапки Ч по тексту и типам €чеек на листе.
-' ѕодпись группы стоит только над первым столбцом группы, поэтому пуста€
-' клетка наследует подпись слева; итог Ђ—евер »тогї относитс€ к группе
-' Ђ—еверї, котора€ стоит пр€мо перед ним.
-Private Sub —н€ть—толбцыѕоЋисту(pt As PivotTable)
-
-    Dim cr As Range, db As Range, j As Long, k As Long, r As Long, s As String
-    Dim строк As Long, верх As Long, ct As Long
-    Dim стек() As String, послЌепуст As Long, база As String
-    Dim нужна() As Boolean, t As Long, сырые() As String, типы() As Long, q As Long
-
-    On Error Resume Next
-    Set cr = pt.ColumnRange
-    Set db = pt.DataBodyRange
-    On Error GoTo 0
-    If cr Is Nothing Then
-        ReDim cItem(1 To nC, 1 To 1)
-        For j = 1 To nC
-            cItem(j, 1) = mMeas(1)
-            If nMeas > 1 And j <= nMeas Then cItem(j, 1) = mMeas(j)
-            cCnt(j) = 1
-            cType(j) = LT_REGULAR
-        Next j
-        Exit Sub
-    End If
-
-    верх = cr.Row
-    строк = db.Row - верх
-    If строк < 1 Then строк = 1: верх = db.Row - 1
-    ReDim сырые(1 To строк, 1 To nC)
-    ReDim типы(1 To строк, 1 To nC)
-    ReDim нужна(1 To строк)
-
-    ' строки шапки, где только кнопки полей и надписи ЂЌазвани€ столбцовї,
-    ' уровн€ не задают Ч выкидываем
-    For r = 1 To строк
-        For j = 1 To nC
-            сырые(r, j) = ¬—троку(db.Worksheet.Cells(верх + r - 1, db.Column + j - 1).Value)
-            ct = -1
-            On Error Resume Next
-            ct = db.Worksheet.Cells(верх + r - 1, db.Column + j - 1).PivotCell.PivotCellType
-            If Err.Number <> 0 Then ct = -1: Err.Clear
-            On Error GoTo 0
-            типы(r, j) = ct
-            If ct = CT_ITEM Or ct = CT_SUBTOTAL Or ct = CT_GRAND Or ct = CT_DATAFIELD _
-               Or ct = CT_CUSTOMSUB Then нужна(r) = True
-            If ct = -1 And Len(Trim$(сырые(r, j))) > 0 Then нужна(r) = True
-        Next j
-    Next r
-    t = 0
-    For r = 1 To строк
-        If нужна(r) Then t = t + 1
-    Next r
-    If t = 0 Then t = 1: нужна(строк) = True
-
-    ReDim cItem(1 To nC, 1 To t)
-    ReDim стек(1 To t)
-    For j = 1 To nC
-        cType(j) = LT_REGULAR
-        k = 0
-        послЌепуст = 0
-        For r = 1 To строк
-            If нужна(r) Then
-                k = k + 1
-                s = сырые(r, j)
-                ct = типы(r, j)
-                If ct = CT_GRAND Then cType(j) = LT_GRAND
-                If ct = CT_SUBTOTAL Or ct = CT_CUSTOMSUB Then cType(j) = LT_SUBTOTAL
-                If ct = -1 Then
-                    If Ётоќбщий»тог(s) Then
-                        cType(j) = LT_GRAND
-                    ElseIf Len(—уффикс»тога(s)) > 0 Then
-                        cType(j) = LT_SUBTOTAL
-                    End If
-                End If
-                If Len(Trim$(s)) > 0 Then послЌепуст = k
-                If cType(j) <> LT_REGULAR And Len(Trim$(s)) > 0 Then Exit For
-                If Len(Trim$(s)) > 0 Then
-                    стек(k) = s
-                    For q = k + 1 To t
-                        стек(q) = ""
-                    Next q
-                End If
-                cItem(j, k) = стек(k)
-            End If
-        Next r
-        If cType(j) = LT_SUBTOTAL Then
-            ' путь итога Ч это подписи его группы
-            база = —уффикс»тога(s)
-            If Len(база) = 0 Then база = стек(k)
-            For q = 1 To k - 1
-                cItem(j, q) = стек(q)
-            Next q
-            cItem(j, k) = база
-            cCnt(j) = k
-        ElseIf cType(j) = LT_GRAND Then
-            cItem(j, 1) = “екстќбщего»тога()
-            cCnt(j) = 1
-        Else
-            cCnt(j) = послЌепуст
-            If cCnt(j) < 1 Then cCnt(j) = 1
-            For q = 1 To cCnt(j)
-                cItem(j, q) = стек(q)
-            Next q
-        End If
-        ' мера столбца Ч если в подписи есть еЄ им€
-        For q = 1 To nMeas
-            If Len(mMeas(q)) > 0 And InStr(1, s, mMeas(q), vbTextCompare) > 0 Then cDF(j) = mMeas(q)
-        Next q
-    Next j
-
-End Sub
 
 
 '==========================================================================
@@ -1747,6 +1629,155 @@ End Function
 
 
 '==========================================================================
+'  яƒ–ќ: Ўјѕ ј —“ќЋЅ÷ќ¬ ѕќ Ћ»—“”
+'  ¬ход: hTxt/hCT (строки шапки над значени€ми), inCLT (тип столбца из оси),
+'  m—лужебные, mMeas. ¬ыход: cItem/cCnt/cType/cDF/cMeasLev.
+'  ѕодпись группы стоит только над первым столбцом группы Ч пуста€ клетка
+'  верхних строк наследует подпись слева. ¬ самой нижней строке шапки
+'  наследовани€ нет: пуста€ клетка там Ч пустой элемент, а не продолжение.
+'==========================================================================
+Private Sub ЎапкаѕоЋисту()
+
+    Dim r As Long, j As Long, k As Long, q As Long, t As Long, ct As Long
+    Dim нужна() As Boolean, ур() As Long, стек() As String, s As String
+    Dim typ As Long, итогЌа As Long, база As String, лучш As Long, n As Long, m As Long
+
+    ReDim нужна(1 To nHR)
+    For r = 1 To nHR
+        For j = 1 To nC
+            ct = hCT(r, j)
+            If ct = CT_ITEM Or ct = CT_SUBTOTAL Or ct = CT_GRAND Or ct = CT_DATAFIELD Or ct = CT_CUSTOMSUB Then
+                нужна(r) = True
+            ElseIf ct = -1 And Len(hTxt(r, j)) > 0 And Not —лужебна€(hTxt(r, j)) Then
+                нужна(r) = True
+            End If
+        Next j
+    Next r
+    t = 0
+    ReDim ур(1 To nHR)
+    For r = 1 To nHR
+        If нужна(r) Then t = t + 1: ур(t) = r
+    Next r
+    If t = 0 Then t = 1: ур(1) = nHR
+
+    ReDim cItem(1 To nC, 1 To t)
+    ReDim стек(1 To t)
+    ReDim cCnt(1 To nC)
+    ReDim cType(1 To nC)
+    ReDim cDF(1 To nC)
+
+    ' уровень мер Ч строка, где больше всего подписей совпадает с мерами
+    cMeasLev = 0: лучш = 0
+    For k = 1 To t
+        n = 0
+        For j = 1 To nC
+            If Len(ћераѕо“ексту(hTxt(ур(k), j), True)) > 0 Then n = n + 1
+        Next j
+        If n > лучш Then лучш = n: cMeasLev = k
+    Next k
+
+    For j = 1 To nC
+        ' тип столбца: ось, иначе тип €чейки, иначе текст
+        typ = inCLT(j)
+        If typ < 0 Then
+            typ = LT_REGULAR
+            For k = 1 To t
+                ct = hCT(ур(k), j)
+                s = hTxt(ур(k), j)
+                If ct = CT_GRAND Then typ = LT_GRAND
+                If (ct = CT_SUBTOTAL Or ct = CT_CUSTOMSUB) And typ <> LT_GRAND Then typ = LT_SUBTOTAL
+                If ct = -1 And Len(s) > 0 Then
+                    If Ётоќбщий»тог(s) Or Left$(LCase$(s), 5) = "итог " Or Left$(LCase$(s), 6) = "total " Then
+                        typ = LT_GRAND
+                    ElseIf Len(—уффикс»тога(s)) > 0 And typ <> LT_GRAND Then
+                        typ = LT_SUBTOTAL
+                    End If
+                End If
+            Next k
+        End If
+        If typ = LT_BLANK Then typ = LT_REGULAR
+        cType(j) = typ
+
+        ' клетка с подписью итога Ч сама€ нижн€€ непуста€
+        итогЌа = 0
+        If typ <> LT_REGULAR Then
+            For k = t To 1 Step -1
+                If Len(hTxt(ур(k), j)) > 0 And Not —лужебна€(hTxt(ур(k), j)) Then итогЌа = k: Exit For
+            Next k
+            If итогЌа = 0 Then итогЌа = 1
+        End If
+
+        For k = 1 To t
+            s = hTxt(ур(k), j)
+            If —лужебна€(s) Then s = ""
+            If typ <> LT_REGULAR And k = итогЌа Then
+                ' итог: путь Ч подписи групп над ним, сам уровень Ч им€ группы
+                For q = 1 To k - 1
+                    cItem(j, q) = стек(q)
+                Next q
+                If typ = LT_SUBTOTAL Then
+                    база = —уффикс»тога(s)
+                    If Len(база) = 0 Then база = стек(k)
+                    If Len(база) = 0 Then база = s
+                    cItem(j, k) = база
+                Else
+                    cItem(j, k) = s
+                End If
+                cCnt(j) = k
+                Exit For
+            End If
+            If Len(s) > 0 Then
+                стек(k) = s
+                For q = k + 1 To t
+                    стек(q) = ""
+                Next q
+            ElseIf k = t Then
+                стек(k) = ""            ' пустой элемент на нижнем уровне
+            End If
+            cItem(j, k) = стек(k)
+        Next k
+        If typ = LT_REGULAR Then cCnt(j) = t
+
+        ' мера столбца
+        If cMeasLev > 0 And cMeasLev <= cCnt(j) Then cDF(j) = ћераѕо“ексту(cItem(j, cMeasLev), True)
+        If Len(cDF(j)) = 0 Then
+            For k = 1 To t
+                If Len(hTxt(ур(k), j)) > 0 Then
+                    m = 0
+                    cDF(j) = ћераѕо“ексту(hTxt(ур(k), j), False)
+                    If Len(cDF(j)) > 0 Then Exit For
+                End If
+            Next k
+        End If
+    Next j
+
+End Sub
+
+Private Function —лужебна€(ByVal s As String) As Boolean
+    If Len(s) = 0 Then Exit Function
+    —лужебна€ = (InStr(1, m—лужебные, "|" & LCase$(Trim$(s)) & "|", vbBinaryCompare) > 0)
+End Function
+
+' ћера, названна€ в тексте: точно = подпись равна имени меры,
+' иначе Ч им€ меры входит в подпись (Ђ»тог дельта суммыї); берЄм самое длинное
+Private Function ћераѕо“ексту(ByVal s As String, ByVal точно As Boolean) As String
+    Dim q As Long, лучш As String
+    s = Trim$(s)
+    If Len(s) = 0 Then Exit Function
+    For q = 1 To nMeas
+        If Len(mMeas(q)) > 0 Then
+            If точно Then
+                If StrComp(s, mMeas(q), vbTextCompare) = 0 Then ћераѕо“ексту = mMeas(q): Exit Function
+            ElseIf InStr(1, s, mMeas(q), vbTextCompare) > 0 Then
+                If Len(mMeas(q)) > Len(лучш) Then лучш = mMeas(q)
+            End If
+        End If
+    Next q
+    If Not точно Then ћераѕо“ексту = лучш
+End Function
+
+
+'==========================================================================
 '  яƒ–ќ: Ўјѕ ј —“ќЋЅ÷ќ¬
 '  ¬ход: cItem/cCnt/cType/cDF/cMeasLev/mMeas. ¬ыход: dLev/dDepth/nLev.
 '==========================================================================
@@ -2192,10 +2223,12 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         Next ci
     Next k
     ws.Range(ws.Cells(rHdr, cData), ws.Cells(rNum - 1, cLast)).Value = a
+    ' подписи слева Ч в верхнюю строку шапки: ниже они объедин€ютс€ по высоте,
+    ' а при объединении остаЄтс€ значение верхней клетки
     For k = 1 To nLbl
-        ws.Cells(rNum - 1, cLbl + k - 1).Value = “екстячейки(mLblCap(k))
+        ws.Cells(rHdr, cLbl + k - 1).Value = “екстячейки(mLblCap(k))
     Next k
-    ws.Cells(rNum - 1, 1).Value = "є"
+    ws.Cells(rHdr, 1).Value = "є"
 
     With ws.Range(ws.Cells(rHdr, 1), ws.Cells(rNum - 1, cLast))
         .Font.Bold = True
