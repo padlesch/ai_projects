@@ -71,7 +71,7 @@ def main():
                 continue
             root = gen_tree(rnd, depth, 12)
             case, rows = build_case(root, depth, layout, subt)
-            out = b.call('Построить', manual.encode(case), 3)
+            out = b.call('Построить', manual.encode(case), 2)
             total += 1
             if not out or out.startswith('ОШИБКА'):
                 fails += 1
@@ -106,6 +106,24 @@ def main():
                 print('FAIL', layout, subt, depth, errs[:3])
             if layout == 'outline' and subt == 'top' and depth == 10:
                 sample = got[:22]
+            # шаблон-лестница (палитра 3 «Океан»): чем главнее уровень, тем темнее
+            out3 = b.call('Построить', manual.encode(case), 3)
+            lines3 = [l for l in out3.split('\n') if l][2:]
+            lum = {}
+            for ln, path in zip(lines3, exp):
+                c = [x.split(US) for x in ln.split(RS) if x][1][1][-6:]
+                rgb = [int(c[i:i + 2], 16) for i in (4, 2, 0)]
+                lum.setdefault(len(path), set()).add(sum(rgb))
+            if any(len(v) != 1 for v in lum.values()):
+                errs3 = [f'уровень {d}: разные заливки {v}' for d, v in lum.items() if len(v) != 1]
+            else:
+                lv = {d: next(iter(v)) for d, v in lum.items()}
+                errs3 = [f'уровень {d} не светлее уровня {d - 1}' for d in lv if d - 1 in lv and d < depth and not lv[d] > lv[d - 1]]
+                if depth in lv and lv[depth] != 255 * 3:
+                    errs3.append('детализация не белая')
+            if errs3:
+                fails += 1
+                print('FAIL лестница', layout, subt, depth, errs3[:3])
         print(f'10 уровней, весь путь до листа: {total - fails}/{total} сводных без ошибок')
         if sample:
             print('пример: структура, итоги вверху, 10 уровней — первые строки отчёта (палитра A):')

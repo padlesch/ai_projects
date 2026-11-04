@@ -43,7 +43,7 @@ Public Function Построить(ByVal s As String, ByVal номерЛиста
     ЯдроПослеПорядка
     ReDim mФорматКол(1 To nC): ReDim mФорматСтр(1 To nR)
     For j = 1 To nC: mФорматКол(j) = "General": Next j
-    mФильтры = ""
+    mФильтры = "Палитра " & номерЛиста & ": " & ИмяПалитры(номерЛиста)
     InitPalette номерЛиста    ' второй параметр — номер палитры
     ' каждый отчёт — на новом чистом листе, как в макросе
     Set ws = ActiveWorkbook.Worksheets.Add

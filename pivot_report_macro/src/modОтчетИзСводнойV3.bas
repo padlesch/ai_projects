@@ -60,6 +60,8 @@ Private Const CT_BLANK      As Long = 9
 Private cTitle As Long, cBordo As Long, cHead As Long, cNum As Long
 Private cBrd As Long, cBrdOut As Long, cHeadFont As Long
 Private pТон As Boolean           ' палитра считается от цвета шапки
+Private pРамп As Boolean          ' шаблон-лестница: уровни — оттенки одной краски
+Private pБаза As Long             ' основная краска шаблона-лестницы
 Private pИтог As Long, pУр(1 To 4) As Long, pКлюч As Long, pПромКол As Long
 Private mПал As Long
 Private Const C_ПРОЧЕРК As Long = 10921638   ' RGB(166,166,166) — «-» вместо пусто
@@ -217,14 +219,17 @@ End Sub
 '  Чтобы добавить палитру: увеличить ЧислоПалитр, дописать имя и Case.
 '==========================================================================
 Private Function ЧислоПалитр() As Long
-    ЧислоПалитр = 4
+    ЧислоПалитр = 7
 End Function
 
 Private Function ИмяПалитры(ByVal n As Long) As String
     Select Case n
-        Case 2: ИмяПалитры = "Серый"
-        Case 3: ИмяПалитры = "A · старый формат (персиковые итоги)"
-        Case 4: ИмяПалитры = "B · стандартный шаблон (сине-серые итоги)"
+        Case 2: ИмяПалитры = "Персиковый · A (старый формат)"
+        Case 3: ИмяПалитры = "Океан — глубокий синий"
+        Case 4: ИмяПалитры = "Изумруд — сине-зелёный"
+        Case 5: ИмяПалитры = "Графит — сланцевый"
+        Case 6: ИмяПалитры = "Терракота"
+        Case 7: ИмяПалитры = "Хвоя — лесной зелёный"
         Case Else: ИмяПалитры = "Тёмно-синий"
     End Select
 End Function
@@ -233,16 +238,14 @@ Private Sub InitPalette(ByVal n As Long)
     If n < 1 Or n > ЧислоПалитр() Then n = 1
     mПал = n
     pТон = False
+    pРамп = False
     cHeadFont = RGB(255, 255, 255)
     cBordo = RGB(139, 46, 60)        ' подзаголовок / фильтры
     cNum = RGB(166, 166, 166)        ' нумерация
     cBrd = RGB(191, 191, 191)        ' внутренние границы
     cBrdOut = RGB(140, 140, 140)     ' внешняя рамка
     Select Case n
-        Case 2          ' серый
-            pТон = True
-            cTitle = RGB(74, 79, 85): cHead = RGB(112, 119, 126)
-        Case 3          ' A · старый формат
+        Case 2          ' A · старый формат — цвета из дизайна
             cTitle = RGB(31, 56, 100)       ' #1F3864 тёмно-синий
             cBordo = RGB(154, 59, 44)       ' #9A3B2C кирпичный
             cHead = RGB(242, 242, 242)      ' #F2F2F2 шапка таблицы
@@ -256,27 +259,46 @@ Private Sub InitPalette(ByVal n As Long)
             pУр(3) = RGB(233, 243, 227)     ' #E9F3E3
             pКлюч = RGB(237, 237, 237)      ' #EDEDED ключевая колонка
             pПромКол = RGB(221, 235, 247)   ' #DDEBF7 промежуточные итоги
-        Case 4          ' B · стандартный шаблон
-            cTitle = RGB(27, 58, 92)        ' #1B3A5C глубокий синий
-            cBordo = RGB(45, 106, 115)      ' #2D6A73 морская волна
-            cHead = RGB(232, 236, 240)      ' #E8ECF0 шапка таблицы
-            cHeadFont = RGB(31, 31, 31)     ' #1F1F1F
-            cNum = RGB(102, 112, 122)       ' #66707A служебный
-            cBrdOut = RGB(154, 165, 177)    ' #9AA5B1
-            cBrd = RGB(211, 217, 223)       ' #D3D9DF
-            pИтог = RGB(201, 220, 236)      ' #C9DCEC общий итог
-            pУр(1) = RGB(220, 232, 243)     ' #DCE8F3
-            pУр(2) = RGB(234, 241, 248)     ' #EAF1F8
-            pУр(3) = RGB(238, 244, 234)     ' #EEF4EA
-            pКлюч = RGB(236, 239, 242)      ' #ECEFF2 ключевая колонка
-            pПромКол = RGB(214, 236, 236)   ' #D6ECEC бирюзовый светлый
+            pУр(4) = Оттенок(pУр(3), 0.5)
+        Case 3: ЛестницаПалитры RGB(23, 60, 102), RGB(196, 90, 17)    ' Океан #173C66, акцент #C45A11
+        Case 4: ЛестницаПалитры RGB(11, 83, 81), RGB(176, 74, 40)     ' Изумруд #0B5351, акцент #B04A28
+        Case 5: ЛестницаПалитры RGB(45, 55, 66), RGB(166, 52, 46)     ' Графит #2D3742, акцент #A6342E
+        Case 6: ЛестницаПалитры RGB(122, 52, 24), RGB(31, 78, 121)    ' Терракота #7A3418, акцент #1F4E79
+        Case 7: ЛестницаПалитры RGB(35, 82, 52), RGB(139, 46, 60)     ' Хвоя #235234, акцент #8B2E3C
         Case Else       ' тёмно-синий
             pТон = True
             cTitle = RGB(31, 56, 100): cHead = RGB(47, 78, 111)
     End Select
-    ' уровни глубже третьего дизайн не задаёт — ещё светлее третьего
-    pУр(4) = Оттенок(pУр(3), 0.5)
 End Sub
+
+' Шаблон-«лестница»: одна глубокая краска, уровни — её оттенки от тёмного
+' к светлому: чем главнее уровень, тем темнее заливка.
+Private Sub ЛестницаПалитры(ByVal база As Long, ByVal акцент As Long)
+    pРамп = True
+    pБаза = база
+    cTitle = база
+    cHead = база
+    cHeadFont = RGB(255, 255, 255)
+    cBordo = акцент
+    cNum = RGB(128, 128, 128)
+    cBrd = Оттенок(база, 0.82)
+    cBrdOut = Оттенок(база, 0.45)
+End Sub
+
+' Доля осветления уровня d в шаблоне-лестнице: 1 — насыщенный, дальше светлее
+Private Function ЯркостьУровня(ByVal d As Long) As Double
+    Select Case d
+        Case Is <= 1: ЯркостьУровня = 0.45
+        Case 2: ЯркостьУровня = 0.6
+        Case 3: ЯркостьУровня = 0.71
+        Case 4: ЯркостьУровня = 0.79
+        Case 5: ЯркостьУровня = 0.85
+        Case 6: ЯркостьУровня = 0.89
+        Case 7: ЯркостьУровня = 0.92
+        Case 8: ЯркостьУровня = 0.945
+        Case Else: ЯркостьУровня = 0.965
+    End Select
+End Function
 
 ' Осветление к белому: 0 — исходный цвет, 1 — чистый белый
 Private Function Оттенок(ByVal c As Long, ByVal f As Double) As Long
@@ -301,6 +323,35 @@ Private Function ЦветРоли(ByVal стр As String, ByVal кол As String
             ЦветРоли = Оттенок(cHead, g)
         ElseIf f >= 0 Then
             ЦветРоли = Оттенок(cHead, f)
+        Else
+            ЦветРоли = -1
+        End If
+        Exit Function
+    End If
+    If pРамп Then
+        ' лестница: общий итог — почти краска, уровни светлеют вглубь;
+        ' ключевая колонка — на тон темнее своей строки
+        If стр = "G" Then
+            f = 0.18
+        ElseIf Left$(стр, 1) = "S" Then
+            d = 1
+            If Len(стр) > 1 Then d = CLng(Mid$(стр, 2))
+            f = ЯркостьУровня(d)
+        Else
+            f = -1
+        End If
+        If f >= 0 Then
+            If кол = "G" Then
+                f = f - 0.08
+            ElseIf кол = "S" Then
+                f = f - 0.04
+            End If
+            If f < 0 Then f = 0
+            ЦветРоли = Оттенок(pБаза, f)
+        ElseIf кол = "G" Then
+            ЦветРоли = Оттенок(pБаза, 0.86)
+        ElseIf кол = "S" Then
+            ЦветРоли = Оттенок(pБаза, 0.93)
         Else
             ЦветРоли = -1
         End If
@@ -393,7 +444,7 @@ Private Function МеткаСтроки(ByVal класс As String) As String
         МеткаСтроки = "RG"
     ElseIf Left$(класс, 1) = "S" Then
         d = CLng(Mid$(класс, 2))
-        If d > 4 Then d = 4
+        If d > 9 Then d = 9
         МеткаСтроки = "RS" & d
     Else
         МеткаСтроки = "RD"
@@ -486,8 +537,12 @@ Private Function ПерекраситьЛист(ws As Worksheet, ByVal n As Long
         роль = РольЯчейки(ws.Cells(r, 1))
         Select Case роль
             Case "RG": mКлассСтр(r - rData + 1) = "G"
-            Case "RS1", "RS2", "RS3", "RS4": mКлассСтр(r - rData + 1) = "S" & Right$(роль, 1)
-            Case Else: mКлассСтр(r - rData + 1) = ""
+            Case Else
+                If Left$(роль, 2) = "RS" And IsNumeric(Mid$(роль, 3)) Then
+                    mКлассСтр(r - rData + 1) = "S" & Mid$(роль, 3)
+                Else
+                    mКлассСтр(r - rData + 1) = ""
+                End If
         End Select
     Next r
     ReDim mКлассКол(1 To cLast - cData + 1)
@@ -2721,6 +2776,14 @@ Private Sub ЗакраситьТело(ws As Worksheet, ByVal rData As Long, ByV
             With ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, cLast)).Interior
                 If база(нач) >= 0 Then .Color = база(нач) Else .Pattern = xlNone
             End With
+            ' текст — по контрасту с заливкой: на тёмной белый, на светлой тёмный
+            ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Font.Color = ТекстНа(база(нач))
+            ' номер «№»: серый на белой детализации, на заливке — как текст строки
+            If база(нач) < 0 Then
+                ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, 1)).Font.Color = cNum
+            Else
+                ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, 1)).Font.Color = ТекстНа(база(нач))
+            End If
             нач = ri
         End If
     Next ri
@@ -2735,8 +2798,11 @@ Private Sub ЗакраситьТело(ws As Worksheet, ByVal rData As Long, ByV
             For ri = 2 To n + 1
                 If цв(ri) <> цв(нач) Then
                     If цв(нач) >= 0 Then
-                        ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
-                                 ws.Cells(rData + ri - 2, cData + ci - 1)).Interior.Color = цв(нач)
+                        With ws.Range(ws.Cells(rData + нач - 1, cData + ci - 1), _
+                                      ws.Cells(rData + ri - 2, cData + ci - 1))
+                            .Interior.Color = цв(нач)
+                            .Font.Color = ТекстНа(цв(нач))
+                        End With
                     End If
                     нач = ri
                 End If
@@ -2744,7 +2810,44 @@ Private Sub ЗакраситьТело(ws As Worksheet, ByVal rData As Long, ByV
         End If
     Next ci
 
+    ' прочерки вместо пустых значений — серые на любой заливке
+    Dim тело As Range
+    Set тело = ws.Range(ws.Cells(rData, cData), ws.Cells(rLast, cLast))
+    If тело.Cells.Count = 1 Then
+        If VarType(тело.Value) = vbString Then тело.Font.Color = C_ПРОЧЕРК
+    Else
+        On Error Resume Next
+        тело.SpecialCells(xlCellTypeConstants, xlTextValues).Font.Color = C_ПРОЧЕРК
+        On Error GoTo 0
+    End If
+
 End Sub
+
+' Цвет текста на заливке: белый, если он контрастнее тёмного (WCAG)
+Private Function ТекстНа(ByVal заливка As Long) As Long
+    Dim L As Double
+    If заливка < 0 Then ТекстНа = C_ТЕКСТ: Exit Function
+    L = Светлота(заливка)
+    If (1.05 / (L + 0.05)) > ((L + 0.05) / (Светлота(C_ТЕКСТ) + 0.05)) Then
+        ТекстНа = RGB(255, 255, 255)
+    Else
+        ТекстНа = C_ТЕКСТ
+    End If
+End Function
+
+' Относительная яркость цвета (WCAG 2.x)
+Private Function Светлота(ByVal c As Long) As Double
+    Dim к(1 To 3) As Double, i As Long, v As Double
+    к(1) = (c Mod 256) / 255
+    к(2) = ((c \ 256) Mod 256) / 255
+    к(3) = ((c \ 65536) Mod 256) / 255
+    For i = 1 To 3
+        v = к(i)
+        If v <= 0.03928 Then v = v / 12.92 Else v = ((v + 0.055) / 1.055) ^ 2.4
+        к(i) = v
+    Next i
+    Светлота = 0.2126 * к(1) + 0.7152 * к(2) + 0.0722 * к(3)
+End Function
 
 ' Метки ролей кусками: строки (столбец A) или колонки (строка нумерации)
 Private Sub ПометитьКуски(ws As Worksheet, ByVal r0 As Long, ByVal c0 As Long, _
