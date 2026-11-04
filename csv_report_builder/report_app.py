@@ -2,7 +2,7 @@
 Отчёт-мейкер: Excel-книга из папки CSV любой структуры. Локально, без интернета: сервер слушает только
 127.0.0.1, CSV никуда не отправляются. Движок — report_builder.py (тот же, что в консоли).
 
-  python report_app.py                  -> откроет браузер на http://127.0.0.1:8765
+  python report_app.py                  -> откроет браузер на http://127.0.0.1:8770
   python report_app.py --port 9000 --no-browser
 
 Вкладки: «Книга» (5 настроек) · «Колонки» (все колонки папки одной таблицей: вид, подпись, подсветка —
@@ -544,6 +544,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/api/version":
+            self.send_json({"app": "report-maker", "version": VERSION})
         else:
             self.send_json({"error": "нет такой страницы"}, 404)
 
@@ -563,6 +565,9 @@ class Handler(BaseHTTPRequestHandler):
                       "/api/pick": pick_folder}
             if self.path in routes:
                 return self.send_json(routes[self.path]())
+            if self.path == "/api/shutdown":       # новый запуск просит прежний освободить порт
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return self.send_json({"ok": True})
             if self.path == "/api/open":
                 target = STATE["last_out"] if payload.get("what") == "book" else STATE["last_folder"]
                 if not target:
@@ -576,20 +581,68 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": f"{type(err).__name__}: {err}"}, 500)
 
 
-def serve(port=8765, browser=True):
+DEFAULT_PORT = 8770      # старые версии (до 1.4) жили на 8765 — новая на них не натыкается
+OLD_PORT = 8765
+
+
+def probe(port):
+    """Кто слушает порт: {"version": …} — наше приложение (версия есть с 1.4), "old" — наше старое
+    (без версии), None — свободен или чужая программа."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/version", timeout=1.5) as r:
+            data = json.loads(r.read())
+            return data if data.get("app") == "report-maker" else None
+    except urllib.error.HTTPError as err:          # старая версия: страницы /api/version нет, но это мы
+        try:
+            body = err.read().decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        return "old" if "нет такой страницы" in body else None
+    except Exception:
+        return None
+
+
+def take_over(port):
+    """Порт занят нашим же прежним запуском (1.4+) — попросить его закрыться и подождать."""
+    import time
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown", data=b"{}",
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=2).read()
+    except Exception:
+        return False
+    for _ in range(30):
+        time.sleep(0.2)
+        try:
+            ThreadingHTTPServer(("127.0.0.1", port), Handler).server_close()
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def serve(port=DEFAULT_PORT, browser=True):
+    server = None
     for p in range(port, port + 20):
         try:
             server = ThreadingHTTPServer(("127.0.0.1", p), Handler)
             break
         except OSError:
-            continue
-    else:
+            who = probe(p)
+            if isinstance(who, dict) and take_over(p):
+                print(f"Прежний запуск (версия {who.get('version')}) на порту {p} закрыт — открываю новую версию.")
+                server = ThreadingHTTPServer(("127.0.0.1", p), Handler)
+                break
+    if server is None:
         sys.exit(f"Порты {port}–{port + 19} заняты")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"Отчёт-мейкер, версия {VERSION}: {url}  (остановить — Ctrl+C или закрыть это окно)")
-    if server.server_address[1] != port:
-        print(f"Порт {port} занят — скорее всего, открыто окно прежнего запуска. Закройте его, иначе в браузере "
-              f"по старой ссылке будет прежняя версия.")
+    if probe(OLD_PORT) == "old":
+        print(f"ВНИМАНИЕ: на порту {OLD_PORT} ещё работает СТАРАЯ версия Отчёт-мейкера (без шаблонов). Закройте её "
+              f"окно консоли или в Диспетчере задач завершите «ReportMaker.exe» / «python.exe». Работайте во вкладке "
+              f"{url} — в шапке страницы должна быть строка «версия {VERSION}».")
     if browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -1059,7 +1112,7 @@ if __name__ == "__main__":
         print(f"Отчёт-мейкер, версия {VERSION}")
         sys.exit()
     ap = argparse.ArgumentParser(description="Отчёт-мейкер: Excel-книга из папки CSV любой структуры (локально)")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true", help="не открывать браузер автоматически")
     a = ap.parse_args()
     serve(a.port, not a.no_browser)
