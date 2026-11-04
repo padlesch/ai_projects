@@ -372,3 +372,14 @@ def test_random_folders_keep_every_row(tmp_path):
     for f, n in expected.items():
         ws = wb[toc[f]]
         assert ws.max_row >= 6 + n                                 # шапка + данные; ничего не потеряно
+
+
+def test_arrow_strings_use_python_regex():
+    """С pyarrow pandas хранит строки в Arrow и гоняет регулярки через RE2 — раньше это роняло чтение всех
+    файлов («invalid escape sequence: \\u»)."""
+    pytest.importorskip("pyarrow")
+    s = pd.Series(["1 234,5", "(150)", "12,5%"], dtype="string[pyarrow]")
+    nums, _ = R.to_numbers(s)
+    assert nums.tolist()[:2] == [1234.5, -150.0]
+    c = R.analyze_column("Сумма", pd.Series(["1 000", "2"], dtype="string[pyarrow]"), {})
+    assert c.is_metric and c.values == [1000.0, 2.0]

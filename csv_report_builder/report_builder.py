@@ -375,7 +375,9 @@ def read_csv_any(path, sep=None):
     renamed = [n for n in names if re.search(r" \(\d+\)$", n) and n not in header]
     if renamed:
         notes.append("повторяющиеся имена колонок переименованы: " + ", ".join(renamed))
-    df = pd.DataFrame(body, columns=names, dtype=object).astype(str) if body else pd.DataFrame(columns=names)
+    # dtype object, не «str»: при установленном pyarrow pandas хранит строки в Arrow и гоняет регулярки через RE2,
+    # который не понимает часть шаблонов; с object всегда работает обычный модуль re
+    df = pd.DataFrame(body, columns=names, dtype=object)
     df = df.apply(lambda s: s.str.strip())
     df = df.mask(df.isin(NULLS), "")
     bad = df.apply(lambda s: s.str.contains(ILLEGAL_CHARACTERS_RE)).to_numpy().sum() if len(df) else 0
@@ -410,7 +412,8 @@ def fix_header(name):
 
 def to_numbers(series):
     """Строки -> float (NaN, где не число). Пробелы-разделители, десятичная запятая, «12,5%» (-> 0.125)."""
-    s = series.str.replace(r"[\s\u00a0\u202f]", "", regex=True)
+    series = series.astype(object)                                 # см. read_csv_any: регулярки — через re
+    s = series.str.replace("[\\s\u00a0\u202f]", "", regex=True)       # пробелы, в т.ч. неразрывные
     s = s.str.replace(r"(?i)(₽|руб\.?|р\.|\$|€|usd|eur|rub)$", "", regex=True).str.replace(r"^[$€₽]", "", regex=True)
     neg = s.str.match(r"^\(.*\)$")                                 # (150) — бухгалтерский минус
     s = s.where(~neg, "-" + s.str.slice(1, -1))
@@ -487,6 +490,7 @@ def norm(text):
 
 
 def analyze_column(name, series, rule):
+    series = series.astype(object)          # регулярки — через re, не RE2 (pyarrow), см. read_csv_any
     col = Col(name)
     role, kind = rule.get("role"), rule.get("kind")
     nonempty = series[series != ""]
