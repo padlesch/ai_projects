@@ -32,6 +32,7 @@ import report_builder as R  # noqa: E402
 KIND_LABELS = {"count": "штуки", "money": "деньги", "number": "другое число", "pct": "процент / доля",
                "delta": "Δ изменение", "delta_pct": "Δ% изменение", "dimension": "разрез / текст",
                "level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "skip": "не выводить"}
+VERSION = "1.4 · 04.11.2026"               # видна в шапке страницы и в консоли — чтобы не гадать, какая запущена
 STATE = {"last_out": None, "last_folder": None}
 PREVIEW_ROWS, PREVIEW_COLS = 40, 30
 
@@ -579,7 +580,10 @@ def serve(port=8765, browser=True):
     else:
         sys.exit(f"Порты {port}–{port + 19} заняты")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
-    print(f"Отчёт-мейкер: {url}  (остановить — Ctrl+C или закрыть это окно)")
+    print(f"Отчёт-мейкер, версия {VERSION}: {url}  (остановить — Ctrl+C или закрыть это окно)")
+    if server.server_address[1] != port:
+        print(f"Порт {port} занят — скорее всего, открыто окно прежнего запуска. Закройте его, иначе в браузере "
+              f"по старой ссылке будет прежняя версия.")
     if browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
@@ -652,10 +656,12 @@ table.grid{border-collapse:collapse;width:100%}
 .sample{color:var(--muted);font-size:12.5px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .note{color:var(--bad);font-size:12.5px}
 .form{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px 18px;max-width:1100px}
+.form .wide{grid-column:span 2}
+@media (max-width:640px){.form .wide{grid-column:auto}}
 .form label.f{display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px}
-.seg{display:flex;flex-wrap:wrap;border:1px solid var(--frame);width:max-content;max-width:100%}
-.seg label{padding:6px 11px;cursor:pointer;border-right:1px solid var(--line);display:flex;gap:5px;align-items:center}
-.seg label:last-child{border-right:0}
+.seg{display:flex;flex-wrap:wrap;gap:6px}
+.seg label{padding:6px 11px;cursor:pointer;border:1px solid var(--frame);display:flex;gap:6px;align-items:center;white-space:nowrap}
+.seg label:has(input:checked){border-color:var(--title);background:var(--sel)}
 .prev{border:1px solid var(--frame);min-width:0;display:flex;flex-direction:column;max-height:calc(100vh - 200px)}
 .prev .ph{display:flex;gap:8px;align-items:center;padding:7px 10px;background:var(--head);border-bottom:1px solid var(--frame)}
 .prev .ph b{color:var(--title);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -685,7 +691,7 @@ pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line
 </head>
 <body>
 <header class="top"><div class="in">
-<span class="brand">Отчёт-мейкер</span>
+<span class="brand">Отчёт-мейкер <small style="font:400 11px Arial;color:var(--muted)">версия %VERSION%</small></span>
 <input type="text" id="folder" placeholder="Папка с CSV, например C:\Users\...\reps" aria-label="Папка с CSV" autocomplete="off">
 <button type="button" id="pick">Выбрать…</button>
 <button type="button" class="primary" id="analyze">Анализировать</button>
@@ -710,10 +716,10 @@ pre.log{white-space:pre-wrap;background:var(--plate);border:1px solid var(--line
 <div><label class="f" for="title">Заголовок (вверху каждого листа)</label><input type="text" id="title"></div>
 <div><label class="f" for="subtitle">Подзаголовок — отбор / источник</label><input type="text" id="subtitle" placeholder="ЗЛ, ДЗМ, взрослые"></div>
 <div><label class="f" for="period">Период к годам в шапке</label><input type="text" id="period" placeholder="9м → «2026 9м»"></div>
-<div><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lgrow">Рост показателей — это</span>
-<div class="seg" role="radiogroup" aria-labelledby="lgrow"><label><input type="radio" name="grow" value="bad">плохо: рост красный</label><label><input type="radio" name="grow" value="good">хорошо: рост зелёный</label></div></div>
-<div><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lpal">Оформление</span>
-<div class="seg" role="radiogroup" aria-labelledby="lpal"><label><input type="radio" name="pal" value="B">палитра B (основная)</label><label><input type="radio" name="pal" value="A">A (старый формат)</label></div></div>
+<div class="wide"><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lgrow">Рост показателей — это</span>
+<div class="seg" role="radiogroup" aria-labelledby="lgrow"><label title="затраты, объёмы оплаты"><input type="radio" name="grow" value="bad">плохо (красный)</label><label title="выручка, выполнение плана"><input type="radio" name="grow" value="good">хорошо (зелёный)</label></div></div>
+<div class="wide"><span class="f" style="display:block;font-weight:600;font-size:12.5px;color:var(--muted);margin:0 0 3px" id="lpal">Оформление</span>
+<div class="seg" role="radiogroup" aria-labelledby="lpal"><label title="стандартный шаблон"><input type="radio" name="pal" value="B">B — основная</label><label title="старый формат АПП"><input type="radio" name="pal" value="A">A — старая</label></div></div>
 </div>
 </section>
 
@@ -1035,7 +1041,7 @@ $("#build").onclick = async () => {
 </script>
 </body>
 </html>
-"""
+""".replace("%VERSION%", VERSION)
 
 
 if __name__ == "__main__":
