@@ -111,6 +111,8 @@ Private cType() As Long
 Private cOrd() As Long
 Private nCOrd As Long
 Private mGrandTxt As String       ' как общий итог назван в самой сводной
+Private mѕоѕол€м As Boolean       ' уровни вз€ты по пол€м сводной, а не по месту
+Private m—лот() As Long           ' место (столбец*1000+отступ) каждого уровн€
 '#ƒ≈ Ћ- ќЌ≈÷
 
 Private mLblCap() As String       ' подписи столбцов с уровн€ми строк
@@ -755,72 +757,7 @@ Private Sub —н€ть—троки(pt As PivotTable, rr As Range, ByRef lbl() As Variant)
         Next k
     Next i
 
-    ' Ќе про каждую €чейку сводна€ знает поле (модель данных называет
-    ' пол€ иначе, чем RowFields). “огда второй точный источник Ч ось:
-    ' кажда€ €чейка линии оси знает свой адрес на листе, номер €чейки
-    ' в линии и есть уровень.
-    If ok And Not ”ровниѕолны() Then ”ровниѕоќси ax, rr
     Application.StatusBar = False
-End Sub
-
-' ” каждой непустой подписи (кроме общего итога) известен уровень?
-Private Function ”ровниѕолны() As Boolean
-    Dim i As Long, k As Long
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 And inCT(i, k) <> CT_GRAND And inLev(i, k) <= 0 Then
-                If inLT(i) <> LT_GRAND Then Exit Function
-            End If
-        Next k
-    Next i
-    ”ровниѕолны = True
-End Function
-
-' ”ровни по оси сводной: €чейка k линии i, лежаща€ в строке i на листе,
-' Ч это подпись уровн€ k. ЅерЄм только обычные линии; итоги получат
-' уровень по месту (ƒозаполнить”ровни), т.к. на модели данных путь итога
-' ось отдаЄт искажЄнным.
-Private Sub ”ровниѕоќси(ax As Object, rr As Range)
-    Dim i As Long, k As Long, c As Long, n As Long, ln As Object, rg As Range
-    Dim lev() As Long, поќси As Long, поѕолю As Long
-    ReDim lev(1 To nR, 1 To nLbl)
-    On Error Resume Next
-    For i = 1 To nR
-        If inLT(i) = LT_REGULAR Then
-            Set ln = ax.PivotLines(i)
-            n = 0
-            n = ln.PivotLineCells.Count
-            For k = 1 To n
-                Set rg = Nothing
-                Set rg = ln.PivotLineCells(k).Range
-                If Not rg Is Nothing Then
-                    If rg.Row = rr.Row + i - 1 Then
-                        c = rg.Column - rr.Column + 1
-                        If c >= 1 And c <= nLbl Then lev(i, c) = k
-                    End If
-                End If
-            Next k
-        End If
-        Err.Clear
-    Next i
-    On Error GoTo 0
-    ' —мешивать источники нельз€ (номера полей и номера уровней оси Ч
-    ' разные шкалы): берЄм тот, что знает больше €чеек, остальное €дро
-    ' дозаполнит по месту на листе.
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 Then
-                If lev(i, k) > 0 Then поќси = поќси + 1
-                If inLev(i, k) > 0 Then поѕолю = поѕолю + 1
-            End If
-        Next k
-    Next i
-    If поќси <= поѕолю Then Exit Sub
-    For i = 1 To nR
-        For k = 1 To nLbl
-            inLev(i, k) = lev(i, k)
-        Next k
-    Next i
 End Sub
 
 ' ѕустое значение сводной: пусто, ошибка или пуста€ строка
@@ -1198,7 +1135,15 @@ Private Sub ядро—троки()
             ' —трока без подписи Ч пустой элемент. ”ровень знает сводна€;
             ' если нет Ч это ребЄнок предыдущей строки (в табличном макете
             ' предыдуща€ строка уже на самом глубоком уровне).
-            lv = ѕустой”ровень(i)
+            lv = 0
+            If mѕоѕол€м Then
+                lv = ѕустой”ровень(i)
+            ElseIf nLbl = 1 Then
+                ' сжатый макет: у пустого элемента тот же отступ, что у соседей
+                For q = 1 To mMaxD
+                    If m—лот(q) = 1000 + ћин(ћакс(inInd(i, 1), 0), 999) Then lv = q: Exit For
+                Next q
+            End If
             If lv = 0 Then lv = преж√луб + 1
             If lv > mMaxD Then lv = mMaxD
             If lv < 1 Then lv = 1
@@ -1334,33 +1279,55 @@ Private Function —уффикс»тога(ByVal s As String) As String
 End Function
 
 ' ”ровень каждой €чейки подписей.
-' ≈сли сводна€ сказала, к какому полю относитс€ кажда€ непуста€ €чейка, Ч
-' уровень = пор€дковый номер пол€. »наче уровень задаЄт место на листе:
-' столбец, а внутри столбца Ч отступ (сжатый макет держит несколько полей
-' в одном столбце и различает их только отступом).
+' √лавный признак Ч место на листе, которое видно глазами: столбец, а внутри
+' столбца Ч отступ (сжатый макет держит несколько полей в одном столбце и
+' различает их только отступом). “ак уровни определ€ютс€ одинаково в любом
+' макете и на модели данных, где сведени€ о пол€х от сводной ненадЄжны.
+' —ведени€ о пол€х берутс€ только когда место неоднозначно: в одном столбце
+' с одним отступом сто€т разные пол€ (сжатый макет с нулевым отступом).
 Private Sub ѕостроить”ровни()
 
-    Dim i As Long, k As Long, j As Long, n As Long, v As Long
-    Dim поѕол€м As Boolean, есть As Boolean
+    Dim i As Long, k As Long, j As Long, n As Long, v As Long, a As Long, м As Long
+    Dim поѕол€м As Boolean
     Dim знач() As Long, сыр() As Long
+    Dim место() As Long, поле() As Long, nм As Long
 
     ReDim mCellLev(1 To nR, 1 To nLbl)
     ReDim сыр(1 To nR, 1 To nLbl)
 
-    ƒозаполнить”ровни
-
-    поѕол€м = True
+    ' есть ли место, где сводна€ называет два разных пол€
+    ReDim место(1 To nR * nLbl + 1)
+    ReDim поле(1 To nR * nLbl + 1)
+    поѕол€м = False
     For i = 1 To nR
         If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
             For k = 1 To nLbl
-                If Len(Trim$(inTxt(i, k))) > 0 Then
-                    есть = True
-                    If inLev(i, k) <= 0 Then поѕол€м = False
+                If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) > 0 Then
+                    м = k * 1000 + ћин(ћакс(inInd(i, k), 0), 999)
+                    For a = 1 To nм
+                        If место(a) = м Then Exit For
+                    Next a
+                    If a > nм Then
+                        nм = nм + 1: место(nм) = м: поле(nм) = inLev(i, k)
+                    ElseIf поле(a) <> inLev(i, k) Then
+                        поѕол€м = True
+                    End If
                 End If
             Next k
         End If
     Next i
-    If Not есть Then поѕол€м = False
+
+    ' по пол€м Ч только если сводна€ знает поле каждой непустой подписи
+    If поѕол€м Then
+        ƒозаполнить”ровни
+        For i = 1 To nR
+            If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
+                For k = 1 To nLbl
+                    If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) <= 0 Then поѕол€м = False
+                Next k
+            End If
+        Next i
+    End If
 
     ' сырые координаты и их различные значени€ по возрастанию
     ReDim знач(1 To nR * nLbl + 1)
@@ -1370,7 +1337,7 @@ Private Sub ѕостроить”ровни()
             For k = 1 To nLbl
                 If Len(Trim$(inTxt(i, k))) > 0 Then
                     If поѕол€м Then
-                        v = inLev(i, k)
+                        v = k * 1000 + ћин(inLev(i, k), 999)
                     Else
                         v = k * 1000 + ћин(ћакс(inInd(i, k), 0), 999)
                     End If
@@ -1381,6 +1348,11 @@ Private Sub ѕостроить”ровни()
         End If
     Next i
     If n = 0 Then n = 1: знач(1) = 1000
+    mѕоѕол€м = поѕол€м
+    ReDim m—лот(1 To n)
+    For j = 1 To n
+        m—лот(j) = знач(j)
+    Next j
 
     mMaxD = n
     ReDim mColOf(1 To mMaxD)
@@ -1682,7 +1654,14 @@ Private Sub ядроѕослеѕор€дка()
             For k = 1 To mMaxD
                 свой(k) = ""
             Next k
-            mOutLbl(p, 1) = “екстќбщего»тога()
+            ' подпись Ч как в сводной: при нескольких мерах в строках итогов
+            ' несколько (Ђ»тог —умма выручкиї, Ђ»тог  оличествої)
+            txt = ""
+            For k = 1 To nLbl
+                If Len(Trim$(inTxt(i, k))) > 0 Then txt = inTxt(i, k): Exit For
+            Next k
+            If Len(txt) = 0 Then txt = “екстќбщего»тога()
+            mOutLbl(p, 1) = txt
             mOutLvl(p) = 1
             пред = 0
             GoTo —лед

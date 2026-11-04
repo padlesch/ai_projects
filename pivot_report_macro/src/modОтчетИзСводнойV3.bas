@@ -111,6 +111,8 @@ Private cType() As Long
 Private cOrd() As Long
 Private nCOrd As Long
 Private mGrandTxt As String       ' как общий итог назван в самой сводной
+Private mПоПолям As Boolean       ' уровни взяты по полям сводной, а не по месту
+Private mСлот() As Long           ' место (столбец*1000+отступ) каждого уровня
 '#ДЕКЛ-КОНЕЦ
 
 Private mLblCap() As String       ' подписи столбцов с уровнями строк
@@ -755,72 +757,7 @@ Private Sub СнятьСтроки(pt As PivotTable, rr As Range, ByRef lbl() As
         Next k
     Next i
 
-    ' Не про каждую ячейку сводная знает поле (модель данных называет
-    ' поля иначе, чем RowFields). Тогда второй точный источник — ось:
-    ' каждая ячейка линии оси знает свой адрес на листе, номер ячейки
-    ' в линии и есть уровень.
-    If ok And Not УровниПолны() Then УровниПоОси ax, rr
     Application.StatusBar = False
-End Sub
-
-' У каждой непустой подписи (кроме общего итога) известен уровень?
-Private Function УровниПолны() As Boolean
-    Dim i As Long, k As Long
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 And inCT(i, k) <> CT_GRAND And inLev(i, k) <= 0 Then
-                If inLT(i) <> LT_GRAND Then Exit Function
-            End If
-        Next k
-    Next i
-    УровниПолны = True
-End Function
-
-' Уровни по оси сводной: ячейка k линии i, лежащая в строке i на листе,
-' — это подпись уровня k. Берём только обычные линии; итоги получат
-' уровень по месту (ДозаполнитьУровни), т.к. на модели данных путь итога
-' ось отдаёт искажённым.
-Private Sub УровниПоОси(ax As Object, rr As Range)
-    Dim i As Long, k As Long, c As Long, n As Long, ln As Object, rg As Range
-    Dim lev() As Long, поОси As Long, поПолю As Long
-    ReDim lev(1 To nR, 1 To nLbl)
-    On Error Resume Next
-    For i = 1 To nR
-        If inLT(i) = LT_REGULAR Then
-            Set ln = ax.PivotLines(i)
-            n = 0
-            n = ln.PivotLineCells.Count
-            For k = 1 To n
-                Set rg = Nothing
-                Set rg = ln.PivotLineCells(k).Range
-                If Not rg Is Nothing Then
-                    If rg.Row = rr.Row + i - 1 Then
-                        c = rg.Column - rr.Column + 1
-                        If c >= 1 And c <= nLbl Then lev(i, c) = k
-                    End If
-                End If
-            Next k
-        End If
-        Err.Clear
-    Next i
-    On Error GoTo 0
-    ' Смешивать источники нельзя (номера полей и номера уровней оси —
-    ' разные шкалы): берём тот, что знает больше ячеек, остальное ядро
-    ' дозаполнит по месту на листе.
-    For i = 1 To nR
-        For k = 1 To nLbl
-            If Len(Trim$(inTxt(i, k))) > 0 Then
-                If lev(i, k) > 0 Then поОси = поОси + 1
-                If inLev(i, k) > 0 Then поПолю = поПолю + 1
-            End If
-        Next k
-    Next i
-    If поОси <= поПолю Then Exit Sub
-    For i = 1 To nR
-        For k = 1 To nLbl
-            inLev(i, k) = lev(i, k)
-        Next k
-    Next i
 End Sub
 
 ' Пустое значение сводной: пусто, ошибка или пустая строка
@@ -1198,7 +1135,15 @@ Private Sub ЯдроСтроки()
             ' Строка без подписи — пустой элемент. Уровень знает сводная;
             ' если нет — это ребёнок предыдущей строки (в табличном макете
             ' предыдущая строка уже на самом глубоком уровне).
-            lv = ПустойУровень(i)
+            lv = 0
+            If mПоПолям Then
+                lv = ПустойУровень(i)
+            ElseIf nLbl = 1 Then
+                ' сжатый макет: у пустого элемента тот же отступ, что у соседей
+                For q = 1 To mMaxD
+                    If mСлот(q) = 1000 + Мин(Макс(inInd(i, 1), 0), 999) Then lv = q: Exit For
+                Next q
+            End If
             If lv = 0 Then lv = прежГлуб + 1
             If lv > mMaxD Then lv = mMaxD
             If lv < 1 Then lv = 1
@@ -1334,33 +1279,55 @@ Private Function СуффиксИтога(ByVal s As String) As String
 End Function
 
 ' Уровень каждой ячейки подписей.
-' Если сводная сказала, к какому полю относится каждая непустая ячейка, —
-' уровень = порядковый номер поля. Иначе уровень задаёт место на листе:
-' столбец, а внутри столбца — отступ (сжатый макет держит несколько полей
-' в одном столбце и различает их только отступом).
+' Главный признак — место на листе, которое видно глазами: столбец, а внутри
+' столбца — отступ (сжатый макет держит несколько полей в одном столбце и
+' различает их только отступом). Так уровни определяются одинаково в любом
+' макете и на модели данных, где сведения о полях от сводной ненадёжны.
+' Сведения о полях берутся только когда место неоднозначно: в одном столбце
+' с одним отступом стоят разные поля (сжатый макет с нулевым отступом).
 Private Sub ПостроитьУровни()
 
-    Dim i As Long, k As Long, j As Long, n As Long, v As Long
-    Dim поПолям As Boolean, есть As Boolean
+    Dim i As Long, k As Long, j As Long, n As Long, v As Long, a As Long, м As Long
+    Dim поПолям As Boolean
     Dim знач() As Long, сыр() As Long
+    Dim место() As Long, поле() As Long, nм As Long
 
     ReDim mCellLev(1 To nR, 1 To nLbl)
     ReDim сыр(1 To nR, 1 To nLbl)
 
-    ДозаполнитьУровни
-
-    поПолям = True
+    ' есть ли место, где сводная называет два разных поля
+    ReDim место(1 To nR * nLbl + 1)
+    ReDim поле(1 To nR * nLbl + 1)
+    поПолям = False
     For i = 1 To nR
         If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
             For k = 1 To nLbl
-                If Len(Trim$(inTxt(i, k))) > 0 Then
-                    есть = True
-                    If inLev(i, k) <= 0 Then поПолям = False
+                If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) > 0 Then
+                    м = k * 1000 + Мин(Макс(inInd(i, k), 0), 999)
+                    For a = 1 To nм
+                        If место(a) = м Then Exit For
+                    Next a
+                    If a > nм Then
+                        nм = nм + 1: место(nм) = м: поле(nм) = inLev(i, k)
+                    ElseIf поле(a) <> inLev(i, k) Then
+                        поПолям = True
+                    End If
                 End If
             Next k
         End If
     Next i
-    If Not есть Then поПолям = False
+
+    ' по полям — только если сводная знает поле каждой непустой подписи
+    If поПолям Then
+        ДозаполнитьУровни
+        For i = 1 To nR
+            If mType(i) <> LT_GRAND And mType(i) <> LT_BLANK Then
+                For k = 1 To nLbl
+                    If Len(Trim$(inTxt(i, k))) > 0 And inLev(i, k) <= 0 Then поПолям = False
+                Next k
+            End If
+        Next i
+    End If
 
     ' сырые координаты и их различные значения по возрастанию
     ReDim знач(1 To nR * nLbl + 1)
@@ -1370,7 +1337,7 @@ Private Sub ПостроитьУровни()
             For k = 1 To nLbl
                 If Len(Trim$(inTxt(i, k))) > 0 Then
                     If поПолям Then
-                        v = inLev(i, k)
+                        v = k * 1000 + Мин(inLev(i, k), 999)
                     Else
                         v = k * 1000 + Мин(Макс(inInd(i, k), 0), 999)
                     End If
@@ -1381,6 +1348,11 @@ Private Sub ПостроитьУровни()
         End If
     Next i
     If n = 0 Then n = 1: знач(1) = 1000
+    mПоПолям = поПолям
+    ReDim mСлот(1 To n)
+    For j = 1 To n
+        mСлот(j) = знач(j)
+    Next j
 
     mMaxD = n
     ReDim mColOf(1 To mMaxD)
@@ -1682,7 +1654,14 @@ Private Sub ЯдроПослеПорядка()
             For k = 1 To mMaxD
                 свой(k) = ""
             Next k
-            mOutLbl(p, 1) = ТекстОбщегоИтога()
+            ' подпись — как в сводной: при нескольких мерах в строках итогов
+            ' несколько («Итог Сумма выручки», «Итог Количество»)
+            txt = ""
+            For k = 1 To nLbl
+                If Len(Trim$(inTxt(i, k))) > 0 Then txt = inTxt(i, k): Exit For
+            Next k
+            If Len(txt) = 0 Then txt = ТекстОбщегоИтога()
+            mOutLbl(p, 1) = txt
             mOutLvl(p) = 1
             пред = 0
             GoTo След

@@ -9,6 +9,7 @@ sys.path.insert(0, HERE)
 from runbasic import Basic
 
 RS, US, GS = chr(30), chr(31), chr(29)
+PERM = {i: 11 - i for i in range(1, 11)}   # обратный порядок полей
 LT_REG, LT_SUB, LT_GRAND, LT_BLANK = 0, 1, 2, 3
 CT_ITEM, CT_SUB, CT_GRAND = 1, 2, 3
 
@@ -111,6 +112,17 @@ def render(root, depth, layout, subt, repeat, grand, info, blanks):
                 cl[1], cl[2] = -1, 0
         elif info == 'field':     # типы и поля ячеек, без оси
             r[0] = -1
+        elif info == 'flat':      # модель данных: у всех ячеек «одно поле»
+            for cl in r[2]:
+                if cl[0]:
+                    cl[2] = 1
+        elif info == 'perm':      # номера полей не совпадают с вложенностью
+            for cl in r[2]:
+                if cl[2] > 0:
+                    cl[2] = PERM[cl[2]]
+        elif info == 'noindent':  # сжатый макет без отступа: различают только поля
+            for cl in r[2]:
+                cl[3] = 0
         elif info == 'partial':   # поле известно, кроме ячеек итогов
             r[0] = -1
             for cl in r[2]:
@@ -214,10 +226,12 @@ def rows_cases(n_random, rnd):
     for depth in range(1, 11):
         for layout, subt, repeat, grand, info, blanks in itertools.product(
                 layouts, ['none', 'top', 'bottom'], [False, True], [False, True],
-                ['field', 'geom', 'lt', 'partial'], [False, True]):
+                ['field', 'geom', 'lt', 'partial', 'flat', 'perm', 'noindent'], [False, True]):
             if layout == 'tabular' and subt == 'top':
                 continue        # Excel так не умеет
             if layout == 'compact' and repeat:
+                continue
+            if info == 'noindent' and layout != 'compact':
                 continue
             cases.append((depth, layout, subt, repeat, grand, info, blanks))
     rnd.shuffle(cases)
