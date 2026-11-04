@@ -1785,81 +1785,79 @@ End Function
 '==========================================================================
 Private Sub —обратьЎапку()
 
-    Dim j As Long, k As Long, maxLev As Long
-    Dim мера() As String, выносить As Boolean
-    Dim пор() As Long, np As Long, сдвиг As Long, задано As Long
+    Dim j As Long, k As Long, maxLev As Long, L As Long
+    Dim мера() As String
     Dim счЄт As Long, пусто As Boolean
 
     maxLev = 1
     For j = 1 To nC
         If cCnt(j) > maxLev Then maxLev = cCnt(j)
     Next j
-    If UBound(cItem, 2) < maxLev Then maxLev = UBound(cItem, 2)
+    If UBound(cItem, 2) > maxLev Then maxLev = UBound(cItem, 2)
 
     ¬осстановитьѕуть»тогов cItem, cCnt, cType, nC, maxLev
 
-    выносить = (cMeasLev > 0 And nMeas > 1)
-
-    ' --- мера дл€ каждого столбца ---
+    ' --- мера каждого столбца (нужна столбцам итогов) ---
     ReDim мера(1 To nC)
-    If выносить Then
-        счЄт = 0
-        For j = 1 To nC
-            If cType(j) = LT_SUBTOTAL Or (cType(j) = LT_GRAND And Len(cDF(j)) = 0) Then
-                ' Excel выдаЄт по одному столбцу итога на каждую меру подр€д,
-                ' в пор€дке мер Ч по позиции в серии и определ€ем меру
-                If j > 1 Then
-                    If cType(j - 1) = cType(j) And ќдин люч(cItem, cCnt, j - 1, j) Then
-                        счЄт = счЄт + 1
-                    Else
-                        счЄт = 1
-                    End If
+    счЄт = 0
+    For j = 1 To nC
+        If Len(cDF(j)) > 0 Then
+            мера(j) = cDF(j)
+        ElseIf cType(j) <> LT_REGULAR And nMeas > 1 Then
+            ' Excel выдаЄт по одному столбцу итога на каждую меру подр€д,
+            ' в пор€дке мер Ч по позиции в серии и определ€ем меру
+            If j > 1 Then
+                If cType(j - 1) = cType(j) And ќдин люч(cItem, cCnt, j - 1, j) Then
+                    счЄт = счЄт + 1
                 Else
                     счЄт = 1
                 End If
-                If счЄт >= 1 And счЄт <= nMeas Then мера(j) = mMeas(счЄт)
-            ElseIf Len(cDF(j)) > 0 Then
-                мера(j) = cDF(j)
-            ElseIf cMeasLev <= cCnt(j) Then
-                мера(j) = cItem(j, cMeasLev)
+            Else
+                счЄт = 1
             End If
-        Next j
-    End If
+            If счЄт >= 1 And счЄт <= nMeas Then мера(j) = mMeas(счЄт)
+        ElseIf cMeasLev > 0 And cMeasLev <= cCnt(j) Then
+            мера(j) = cItem(j, cMeasLev)
+        End If
+    Next j
 
-    ' --- уровни в пор€дке вывода: мера Ч вперЄд ---
-    ReDim пор(1 To maxLev)
-    np = 0
-    For k = 1 To maxLev
-        If Not (выносить And k = cMeasLev) Then np = np + 1: пор(np) = k
-    Next k
-
-    If выносить Then nLev = np + 1 Else nLev = np
-    If nLev < 1 Then nLev = 1
-    If выносить Then сдвиг = 1 Else сдвиг = 0
-
+    ' --- уровни шапки Ч в том же пор€дке, что в сводной ---
+    ' (меры остаютс€ на своЄм месте: сверху, если в сводной Ђ«начени€ї
+    ' сто€т первыми, или под элементами, если поле стоит выше Ђ«наченийї)
+    nLev = maxLev
     ReDim dLev(1 To nC, 1 To nLev)
     ReDim dDepth(1 To nC)
 
     For j = 1 To nC
-        If выносить Then dLev(j, 1) = мера(j)
-        If cType(j) = LT_GRAND Then
-            dDepth(j) = сдвиг + 1
-            If сдвиг + 1 <= nLev Then dLev(j, сдвиг + 1) = “екстќбщего»тога()
-        Else
-            ' сколько Ђнасто€щихї уровней у столбца (без уровн€ меры)
-            задано = 0
-            For k = 1 To np
-                If пор(k) <= cCnt(j) Then
-                    dLev(j, сдвиг + k) = cItem(j, пор(k))
-                    задано = k
-                End If
+        L = cCnt(j)
+        If L < 1 Then L = 1
+        If L > nLev Then L = nLev
+        If cType(j) = LT_REGULAR Then
+            For k = 1 To L
+                dLev(j, k) = cItem(j, k)
             Next k
-            dDepth(j) = сдвиг + задано
-            If dDepth(j) < 1 Then dDepth(j) = 1
-            If cType(j) = LT_SUBTOTAL And сдвиг + задано < nLev Then
-                dLev(j, сдвиг + задано + 1) = TXT_SUBTOT
+        Else
+            ' итог: подписи групп над ним, сам он Ч на своЄм уровне
+            For k = 1 To L - 1
+                dLev(j, k) = cItem(j, k)
+            Next k
+            If L = cMeasLev And Len(мера(j)) > 0 Then
+                ' подпись итога стоит в строке мер: мера Ч на еЄ уровне,
+                ' пометка итога Ч уровнем ниже
+                dLev(j, L) = мера(j)
+                If L + 1 <= nLev Then
+                    If cType(j) = LT_GRAND Then dLev(j, L + 1) = “екстќбщего»тога() Else dLev(j, L + 1) = TXT_SUBTOT
+                End If
+            ElseIf cType(j) = LT_GRAND Then
+                dLev(j, L) = “екстќбщего»тога()
+            Else
+                dLev(j, L) = cItem(j, L)
+                If L + 1 <= nLev And L + 1 <> cMeasLev Then dLev(j, L + 1) = TXT_SUBTOT
             End If
+            ' мера итога Ч на уровне мер, если он ниже
+            If cMeasLev > L And cMeasLev <= nLev And Len(мера(j)) > 0 Then dLev(j, cMeasLev) = мера(j)
         End If
+        dDepth(j) = L
     Next j
 
     ”братьѕустые”ровни
@@ -2152,6 +2150,20 @@ Private Function ќдинаковыƒо(ByVal a As Long, ByVal b As Long, ByVal k As Long) 
     Next i
     ќдинаковыƒо = True
 End Function
+
+'  ласс строки дл€ раскраски Ч по ”–ќ¬Ќё, а не по наличию детей:
+' все строки одного уровн€ выгл€д€т одинаково (так в дизайне: итог,
+' уровень 1, 2, 3...). Ќижний уровень сводной Ч детализаци€, без заливки.
+' "G" Ч общий итог, "S<n>" Ч уровень n, "" Ч детализаци€.
+Private Function  ласс—троки(ByVal i As Long) As String
+    If mType(i) = LT_GRAND Then
+         ласс—троки = "G"
+    ElseIf mType(i) = LT_SUBTOTAL Or mDepth(i) < mMaxD Then
+         ласс—троки = "S" & mDepth(i)
+    Else
+         ласс—троки = ""
+    End If
+End Function
 '#яƒ–ќ- ќЌ≈÷
 
 
@@ -2249,10 +2261,8 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         i = mOrd(ri)
         If mType(i) = LT_GRAND Then
             m ласс—тр(ri) = "G"
-        ElseIf m–одитель(i) Then
-            m ласс—тр(ri) = "S" & mDepth(i)
         Else
-            m ласс—тр(ri) = ""
+            m ласс—тр(ri) =  ласс—троки(i)
         End If
     Next ri
 
@@ -2368,7 +2378,7 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
         i = mOrd(ri)
         For ci = 1 To nCOrd
             v = vals(i, cOrd(ci))
-            If ѕустое«начение(v) Then a(ri, ci) = "-" Else a(ri, ci) = v
+            If ѕустое«начение(v) Then a(ri, ci) = "Ц" Else a(ri, ci) = v
         Next ci
     Next ri
     Set rng = ws.Range(ws.Cells(rData, cData), ws.Cells(rLast, cLast))
@@ -2423,6 +2433,9 @@ Private Sub ¬ывестиќтчЄт(ws As Worksheet, ByRef lbl() As Variant, ByRef vals() A
     Next j
     ws.Rows(rNum).RowHeight = 10
     ws.Rows(4).RowHeight = 6
+    ' строки таблицы Ч чуть выше стандартных, текст по центру по вертикали
+    ws.Range(ws.Rows(rData), ws.Rows(rLast)).RowHeight = 15
+    ws.Range(ws.Cells(rHdr, 1), ws.Cells(rLast, cLast)).VerticalAlignment = xlCenter
 
     ' ---------- группировка строк по уровн€м ----------
     If √–”ѕѕ»–ќ¬ј“№ Then —группировать ws, rData
@@ -2515,9 +2528,9 @@ Private Function јвто‘ормат(ByRef vals() As Variant, ByVal i As Long, ByVal j As
         Next a
     End If
     If дроби Then
-        јвто‘ормат = "#,##0.00;[Red]-#,##0.00;""-"""
+        јвто‘ормат = "#,##0.00;-#,##0.00;""Ц"""
     Else
-        јвто‘ормат = "#,##0;[Red]-#,##0;""-"""
+        јвто‘ормат = "#,##0;-#,##0;""Ц"""
     End If
 End Function
 
@@ -2704,7 +2717,8 @@ Private Sub «акрасить“ело(ws As Worksheet, ByVal rData As Long, ByVal rLast As L
     нач = 1
     For ri = 2 To n + 1
         If база(ri) <> база(нач) Then
-            With ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Interior
+            ' строка итога заливаетс€ целиком, вместе с номером Ђєї Ч как в дизайне
+            With ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, cLast)).Interior
                 If база(нач) >= 0 Then .Color = база(нач) Else .Pattern = xlNone
             End With
             нач = ri

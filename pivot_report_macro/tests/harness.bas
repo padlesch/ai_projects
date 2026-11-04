@@ -58,11 +58,7 @@ Private Function ОдинКейс(ByVal s As String) As String
     For p = 1 To nOrd
         i = mOrd(p)
         r = i & Chr(30) & mDepth(i) & Chr(30) & mType(i) & Chr(30) & mOutLvl(p) & Chr(30)
-        If mType(i) = LT_GRAND Then
-            r = r & "G"
-        ElseIf mРодитель(i) Then
-            r = r & "S"
-        End If
+        If Len(КлассСтроки(i)) > 0 Then r = r & Left$(КлассСтроки(i), 1)
         For k = 1 To nLbl
             If mOutR(p, k) > 0 Then t = inTxt(mOutR(p, k), mOutC(p, k)) Else t = mOutLbl(p, k)
             r = r & Chr(30) & t & Chr(31) & mOutInd(p, k)

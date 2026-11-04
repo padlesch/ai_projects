@@ -1785,81 +1785,79 @@ End Function
 '==========================================================================
 Private Sub СобратьШапку()
 
-    Dim j As Long, k As Long, maxLev As Long
-    Dim мера() As String, выносить As Boolean
-    Dim пор() As Long, np As Long, сдвиг As Long, задано As Long
+    Dim j As Long, k As Long, maxLev As Long, L As Long
+    Dim мера() As String
     Dim счёт As Long, пусто As Boolean
 
     maxLev = 1
     For j = 1 To nC
         If cCnt(j) > maxLev Then maxLev = cCnt(j)
     Next j
-    If UBound(cItem, 2) < maxLev Then maxLev = UBound(cItem, 2)
+    If UBound(cItem, 2) > maxLev Then maxLev = UBound(cItem, 2)
 
     ВосстановитьПутьИтогов cItem, cCnt, cType, nC, maxLev
 
-    выносить = (cMeasLev > 0 And nMeas > 1)
-
-    ' --- мера для каждого столбца ---
+    ' --- мера каждого столбца (нужна столбцам итогов) ---
     ReDim мера(1 To nC)
-    If выносить Then
-        счёт = 0
-        For j = 1 To nC
-            If cType(j) = LT_SUBTOTAL Or (cType(j) = LT_GRAND And Len(cDF(j)) = 0) Then
-                ' Excel выдаёт по одному столбцу итога на каждую меру подряд,
-                ' в порядке мер — по позиции в серии и определяем меру
-                If j > 1 Then
-                    If cType(j - 1) = cType(j) And ОдинКлюч(cItem, cCnt, j - 1, j) Then
-                        счёт = счёт + 1
-                    Else
-                        счёт = 1
-                    End If
+    счёт = 0
+    For j = 1 To nC
+        If Len(cDF(j)) > 0 Then
+            мера(j) = cDF(j)
+        ElseIf cType(j) <> LT_REGULAR And nMeas > 1 Then
+            ' Excel выдаёт по одному столбцу итога на каждую меру подряд,
+            ' в порядке мер — по позиции в серии и определяем меру
+            If j > 1 Then
+                If cType(j - 1) = cType(j) And ОдинКлюч(cItem, cCnt, j - 1, j) Then
+                    счёт = счёт + 1
                 Else
                     счёт = 1
                 End If
-                If счёт >= 1 And счёт <= nMeas Then мера(j) = mMeas(счёт)
-            ElseIf Len(cDF(j)) > 0 Then
-                мера(j) = cDF(j)
-            ElseIf cMeasLev <= cCnt(j) Then
-                мера(j) = cItem(j, cMeasLev)
+            Else
+                счёт = 1
             End If
-        Next j
-    End If
+            If счёт >= 1 And счёт <= nMeas Then мера(j) = mMeas(счёт)
+        ElseIf cMeasLev > 0 And cMeasLev <= cCnt(j) Then
+            мера(j) = cItem(j, cMeasLev)
+        End If
+    Next j
 
-    ' --- уровни в порядке вывода: мера — вперёд ---
-    ReDim пор(1 To maxLev)
-    np = 0
-    For k = 1 To maxLev
-        If Not (выносить And k = cMeasLev) Then np = np + 1: пор(np) = k
-    Next k
-
-    If выносить Then nLev = np + 1 Else nLev = np
-    If nLev < 1 Then nLev = 1
-    If выносить Then сдвиг = 1 Else сдвиг = 0
-
+    ' --- уровни шапки — в том же порядке, что в сводной ---
+    ' (меры остаются на своём месте: сверху, если в сводной «Значения»
+    ' стоят первыми, или под элементами, если поле стоит выше «Значений»)
+    nLev = maxLev
     ReDim dLev(1 To nC, 1 To nLev)
     ReDim dDepth(1 To nC)
 
     For j = 1 To nC
-        If выносить Then dLev(j, 1) = мера(j)
-        If cType(j) = LT_GRAND Then
-            dDepth(j) = сдвиг + 1
-            If сдвиг + 1 <= nLev Then dLev(j, сдвиг + 1) = ТекстОбщегоИтога()
-        Else
-            ' сколько «настоящих» уровней у столбца (без уровня меры)
-            задано = 0
-            For k = 1 To np
-                If пор(k) <= cCnt(j) Then
-                    dLev(j, сдвиг + k) = cItem(j, пор(k))
-                    задано = k
-                End If
+        L = cCnt(j)
+        If L < 1 Then L = 1
+        If L > nLev Then L = nLev
+        If cType(j) = LT_REGULAR Then
+            For k = 1 To L
+                dLev(j, k) = cItem(j, k)
             Next k
-            dDepth(j) = сдвиг + задано
-            If dDepth(j) < 1 Then dDepth(j) = 1
-            If cType(j) = LT_SUBTOTAL And сдвиг + задано < nLev Then
-                dLev(j, сдвиг + задано + 1) = TXT_SUBTOT
+        Else
+            ' итог: подписи групп над ним, сам он — на своём уровне
+            For k = 1 To L - 1
+                dLev(j, k) = cItem(j, k)
+            Next k
+            If L = cMeasLev And Len(мера(j)) > 0 Then
+                ' подпись итога стоит в строке мер: мера — на её уровне,
+                ' пометка итога — уровнем ниже
+                dLev(j, L) = мера(j)
+                If L + 1 <= nLev Then
+                    If cType(j) = LT_GRAND Then dLev(j, L + 1) = ТекстОбщегоИтога() Else dLev(j, L + 1) = TXT_SUBTOT
+                End If
+            ElseIf cType(j) = LT_GRAND Then
+                dLev(j, L) = ТекстОбщегоИтога()
+            Else
+                dLev(j, L) = cItem(j, L)
+                If L + 1 <= nLev And L + 1 <> cMeasLev Then dLev(j, L + 1) = TXT_SUBTOT
             End If
+            ' мера итога — на уровне мер, если он ниже
+            If cMeasLev > L And cMeasLev <= nLev And Len(мера(j)) > 0 Then dLev(j, cMeasLev) = мера(j)
         End If
+        dDepth(j) = L
     Next j
 
     УбратьПустыеУровни
@@ -2152,6 +2150,20 @@ Private Function ОдинаковыДо(ByVal a As Long, ByVal b As Long, ByVal 
     Next i
     ОдинаковыДо = True
 End Function
+
+' Класс строки для раскраски — по УРОВНЮ, а не по наличию детей:
+' все строки одного уровня выглядят одинаково (так в дизайне: итог,
+' уровень 1, 2, 3...). Нижний уровень сводной — детализация, без заливки.
+' "G" — общий итог, "S<n>" — уровень n, "" — детализация.
+Private Function КлассСтроки(ByVal i As Long) As String
+    If mType(i) = LT_GRAND Then
+        КлассСтроки = "G"
+    ElseIf mType(i) = LT_SUBTOTAL Or mDepth(i) < mMaxD Then
+        КлассСтроки = "S" & mDepth(i)
+    Else
+        КлассСтроки = ""
+    End If
+End Function
 '#ЯДРО-КОНЕЦ
 
 
@@ -2249,10 +2261,8 @@ Private Sub ВывестиОтчёт(ws As Worksheet, ByRef lbl() As Variant, By
         i = mOrd(ri)
         If mType(i) = LT_GRAND Then
             mКлассСтр(ri) = "G"
-        ElseIf mРодитель(i) Then
-            mКлассСтр(ri) = "S" & mDepth(i)
         Else
-            mКлассСтр(ri) = ""
+            mКлассСтр(ri) = КлассСтроки(i)
         End If
     Next ri
 
@@ -2368,7 +2378,7 @@ Private Sub ВывестиОтчёт(ws As Worksheet, ByRef lbl() As Variant, By
         i = mOrd(ri)
         For ci = 1 To nCOrd
             v = vals(i, cOrd(ci))
-            If ПустоеЗначение(v) Then a(ri, ci) = "-" Else a(ri, ci) = v
+            If ПустоеЗначение(v) Then a(ri, ci) = "–" Else a(ri, ci) = v
         Next ci
     Next ri
     Set rng = ws.Range(ws.Cells(rData, cData), ws.Cells(rLast, cLast))
@@ -2423,6 +2433,9 @@ Private Sub ВывестиОтчёт(ws As Worksheet, ByRef lbl() As Variant, By
     Next j
     ws.Rows(rNum).RowHeight = 10
     ws.Rows(4).RowHeight = 6
+    ' строки таблицы — чуть выше стандартных, текст по центру по вертикали
+    ws.Range(ws.Rows(rData), ws.Rows(rLast)).RowHeight = 15
+    ws.Range(ws.Cells(rHdr, 1), ws.Cells(rLast, cLast)).VerticalAlignment = xlCenter
 
     ' ---------- группировка строк по уровням ----------
     If ГРУППИРОВАТЬ Then Сгруппировать ws, rData
@@ -2515,9 +2528,9 @@ Private Function АвтоФормат(ByRef vals() As Variant, ByVal i As Long, 
         Next a
     End If
     If дроби Then
-        АвтоФормат = "#,##0.00;[Red]-#,##0.00;""-"""
+        АвтоФормат = "#,##0.00;-#,##0.00;""–"""
     Else
-        АвтоФормат = "#,##0;[Red]-#,##0;""-"""
+        АвтоФормат = "#,##0;-#,##0;""–"""
     End If
 End Function
 
@@ -2704,7 +2717,8 @@ Private Sub ЗакраситьТело(ws As Worksheet, ByVal rData As Long, ByV
     нач = 1
     For ri = 2 To n + 1
         If база(ri) <> база(нач) Then
-            With ws.Range(ws.Cells(rData + нач - 1, cLbl), ws.Cells(rData + ri - 2, cLast)).Interior
+            ' строка итога заливается целиком, вместе с номером «№» — как в дизайне
+            With ws.Range(ws.Cells(rData + нач - 1, 1), ws.Cells(rData + ri - 2, cLast)).Interior
                 If база(нач) >= 0 Then .Color = база(нач) Else .Pattern = xlNone
             End With
             нач = ri

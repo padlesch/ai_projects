@@ -16,6 +16,7 @@ import excel_merge
 from runbasic import Basic
 
 RS, US, GS = chr(30), chr(31), chr(29)
+PALETTE = 1
 
 
 def ref(a):
@@ -31,14 +32,26 @@ def load(path):
     c1, r1, c2, r2 = ref(loc[1])
     fdr, fdc = int(loc[3]), int(loc[4])
     meas = re.findall(r'<dataField name="([^"]+)"', pt)
-    rows_items = re.findall(r'<i( r="\d+")?( t="\w+")?>', re.search(r'<rowItems.*?</rowItems>', pt, re.S)[0])
+    def lines(tag):
+        blk = re.search(rf'<{tag}.*?</{tag}>', pt, re.S)
+        out = []
+        for m in re.finditer(r'<i(\s[^>]*)?>(.*?)</i>|<i(\s[^>]*)?/>', blk[0] if blk else ''):
+            attrs = (m[1] or m[3] or '')
+            r = int((re.search(r'\br="(\d+)"', attrs) or [0, 0])[1])
+            t = (re.search(r'\bt="(\w+)"', attrs) or [0, ''])[1]
+            depth = r + len(re.findall(r'<x\b', m[2] or ''))
+            out.append((depth, t))
+        return out
+    rows_items = lines('rowItems')
+    col_items = lines('colItems')
     wb = openpyxl.load_workbook(path)
     ws = [w for w in wb.worksheets if w._pivots][0]
-    return pt, (c1, r1, c2, r2, fdr, fdc), meas, rows_items, ws
+    return pt, (c1, r1, c2, r2, fdr, fdc), meas, (rows_items, col_items), ws
 
 
 def encode(path, with_types):
-    pt, (c1, r1, c2, r2, fdr, fdc), meas, rows_items, ws = load(path)
+    pt, (c1, r1, c2, r2, fdr, fdc), meas, (rows_items, col_items), ws = load(path)
+    LTMAP = {'': 0, 'default': 1, 'sum': 1, 'grand': 2, 'blank': 3}
     nlbl = fdc
     dr, dc = r1 + fdr, c1 + fdc          # первая строка и столбец значений
     nR, nV = r2 - dr + 1, c2 - dc + 1
@@ -50,15 +63,17 @@ def encode(path, with_types):
     rows = []
     for i in range(nR):
         r = dr + i
-        top = rows_items[i][0] == ''          # строка верхнего поля (без r=) — родитель, итог вверху
-        lt = (1 if top else 0) if with_types else -1
+        dep, tt = rows_items[i]
+        nxt = rows_items[i + 1][0] if i + 1 < len(rows_items) else 0
+        top = tt == '' and nxt > dep          # родитель при итогах вверху — линия промитога
+        lt = (LTMAP.get(tt, 0) if tt else (1 if top else 0)) if with_types else -1
         parts = [str(lt)]
         for k in range(nlbl):
             cell = ws.cell(r, c1 + k)
             v = cell.value
             t = '' if v is None else str(v)
             ind = int(cell.alignment.indent or 0)
-            ct = (2 if top else 1) if (with_types and t) else -1
+            ct = ((3 if tt == 'grand' else 2 if (top or tt) else 1) if (with_types and t) else -1)
             parts.append(US.join([t, str(ct), str(ind)]))
         for j in range(nV):
             v = ws.cell(r, dc + j).value
@@ -70,16 +85,18 @@ def encode(path, with_types):
         for j in range(nV):
             v = ws.cell(r, dc + j).value
             t = '' if v is None else str(v)
+            ctt = col_items[j][1] if j < len(col_items) else ''
             if with_types:
-                ct = 8 if (r == r1 and t == 'Значения') else 5 if r == r1 else 4 if t in meas else 1
-                if r == r1 and not t:
+                ct = 8 if (r == r1 and t == 'Значения') else 5 if r == r1 else 4 if t in meas else \
+                    3 if ctt == 'grand' else 2 if ctt else 1
+                if not t:
                     ct = -1
             else:
                 ct = -1
             parts.append(US.join([t, str(ct)]))
         hdr.append(RS.join(parts))
-    clt = RS.join(['0' if with_types else '-1'] * nV)
-    return GS.join([RS.join(head), '\n'.join(rows), '\n'.join(hdr), clt]), ws, (c1, r1, c2, r2, dr, dc)
+    clt = RS.join([str(LTMAP.get(col_items[j][1], 0)) if with_types else '-1' for j in range(nV)])
+    return GS.join([RS.join(head), '\n'.join(rows), '\n'.join(hdr), clt, str(PALETTE)]), ws, (c1, r1, c2, r2, dr, dc)
 
 
 def show_src(ws, box):
@@ -92,6 +109,17 @@ def show_src(ws, box):
             s = '' if v is None else (f'{v:.0f}' if isinstance(v, float) else str(v))
             cells.append(f'{s[:13]:13}')
         print('    ' + '|'.join(cells))
+
+
+def show_colors(out, names):
+    """Заливки строк: номер, подпись, ключевая колонка (итог), обычная колонка."""
+    rows = [l for l in out.split('\n') if l]
+    for ln in rows:
+        cells = [x.split(US) for x in ln.split(RS) if x]
+        bgr = lambda h: h[-6:][4:6] + h[-6:][2:4] + h[-6:][0:2] if len(h) >= 6 else h
+        col = [('—' if c[1].endswith('FFFFFF') else '#' + bgr(c[1])) for c in cells]
+        lab = next((c[0] for c in cells[1:4] if c[0].strip('*<')), '')
+        print(f'    {lab[:24]:24} №:{col[0]:8} подпись:{col[1]:8} итог-колонка:{col[4]:8} обычная:{col[7] if len(col) > 7 else "":8}')
 
 
 def show_rep(out):

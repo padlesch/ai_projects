@@ -57,7 +57,10 @@ Public Function ИзФайла(ByVal s As String) As String
     ReDim mФорматКол(1 To nC): ReDim mФорматСтр(1 To nR)
     For j = 1 To nC: mФорматКол(j) = "General": Next j
     mФильтры = ""
-    InitPalette 1
+    Dim пал As Long
+    пал = 1
+    If UBound(ч) >= 4 Then пал = CLng(ч(4))
+    InitPalette пал
     Set ws = ActiveWorkbook.Worksheets.Add
     ВывестиОтчёт ws, lbl, vals
     For r = 5 To 5 + nLev + nOrd
