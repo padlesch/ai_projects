@@ -33,6 +33,11 @@ KIND_LABELS = {"count": "штуки", "money": "деньги", "number": "дру
                "delta": "Δ изменение", "delta_pct": "Δ% изменение", "dimension": "разрез / текст",
                "level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "skip": "не выводить"}
 VERSION = "1.4 · 04.11.2026"               # видна в шапке страницы и в консоли — чтобы не гадать, какая запущена
+try:                                       # build_info.py пишет сборка exe на GitHub: коммит, из которого собран exe
+    from build_info import BUILD           # noqa: E402
+    VERSION += f" · сборка {BUILD}"
+except ImportError:
+    pass
 STATE = {"last_out": None, "last_folder": None}
 PREVIEW_ROWS, PREVIEW_COLS = 40, 30
 
@@ -535,6 +540,7 @@ class Handler(BaseHTTPRequestHandler):
             body = PAGE.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")      # браузер не должен показывать старую версию из кэша
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1047,6 +1053,9 @@ $("#build").onclick = async () => {
 if __name__ == "__main__":
     if "--pick-folder" in sys.argv:            # окно выбора папки в отдельном процессе (нужно для exe)
         exec(PICK_CODE)
+        sys.exit()
+    if "--version" in sys.argv:
+        print(f"Отчёт-мейкер, версия {VERSION}")
         sys.exit()
     ap = argparse.ArgumentParser(description="Отчёт-мейкер: Excel-книга из папки CSV любой структуры (локально)")
     ap.add_argument("--port", type=int, default=8765)

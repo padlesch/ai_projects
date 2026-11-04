@@ -23,21 +23,32 @@ jobs:
         run: python -m pip install -r requirements-dev.txt pyinstaller
       - name: Тесты
         run: python -m pytest -q tests
+      - name: Номер сборки в exe (виден в шапке страницы и в консоли)
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          "BUILD = `"$sha`"" | Out-File -Encoding utf8 build_info.py
+          "SHA7=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
       - name: Сборка exe
         run: >
           python -m PyInstaller --noconfirm --onefile --name ReportMaker --console
-          --hidden-import tkinter --hidden-import tkinter.filedialog --exclude-module pyarrow report_app.py
+          --hidden-import tkinter --hidden-import tkinter.filedialog --hidden-import build_info --exclude-module pyarrow
+          report_app.py
       - name: Проверка exe — страница, анализ папки, сборка книги
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP "reps"
           New-Item -ItemType Directory -Force $dir | Out-Null
           [IO.File]::WriteAllText("$dir\rep_1_202611010000.csv", "Уровень;Наименование;Группа;Сумма 2026;Сумма 2025`n0;Всего;;10;9`n1;А;А;4;3`n1;Б;Б;6;6`n", [Text.Encoding]::GetEncoding(1251))
+          $ver = (& dist\ReportMaker.exe --version | Out-String)
+          Write-Host $ver
+          if ($ver -notmatch $env:SHA7) { throw "в exe не тот номер сборки: $ver (ждали $env:SHA7)" }
           $p = Start-Process dist\ReportMaker.exe -ArgumentList "--no-browser","--port","8799" -PassThru
           Start-Sleep -Seconds 20
           try {
             $page = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
             if ($page.StatusCode -ne 200 -or $page.Content -notmatch "api/analyze") { throw "страница не открылась" }
+            if ($page.Content -notmatch $env:SHA7 -or $page.Content -notmatch 'id="tpl"') { throw "на странице нет номера сборки или шаблонов" }
             $body = @{ folder = $dir } | ConvertTo-Json
             $a = Invoke-RestMethod -Method Post http://127.0.0.1:8799/api/analyze -Body ([Text.Encoding]::UTF8.GetBytes($body)) -ContentType "application/json"
             if ($a.files.Count -ne 1 -or -not $a.files[0].hierarchy) { throw "анализ папки: неожиданный ответ" }
@@ -53,6 +64,6 @@ jobs:
           } finally { Stop-Process -Id $p.Id -Force }
       - uses: actions/upload-artifact@v4
         with:
-          name: ReportMaker-windows
+          name: ReportMaker-windows-${{ env.SHA7 }}
           path: csv_report_builder/dist/ReportMaker.exe
           if-no-files-found: error
