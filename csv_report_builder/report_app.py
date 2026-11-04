@@ -32,7 +32,7 @@ import report_builder as R  # noqa: E402
 KIND_LABELS = {"count": "штуки", "money": "деньги", "number": "другое число", "pct": "процент / доля",
                "delta": "Δ изменение", "delta_pct": "Δ% изменение", "dimension": "разрез / текст",
                "level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "skip": "не выводить"}
-VERSION = "1.4 · 04.11.2026"               # видна в шапке страницы и в консоли — чтобы не гадать, какая запущена
+VERSION = "1.5 · 04.11.2026"               # видна в шапке страницы и в консоли — чтобы не гадать, какая запущена
 try:                                       # build_info.py пишет сборка exe на GitHub: коммит, из которого собран exe
     from build_info import BUILD           # noqa: E402
     VERSION += f" · сборка {BUILD}"
