@@ -62,7 +62,10 @@ from openpyxl.comments import Comment
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.cell import WriteOnlyCell
+from openpyxl.utils import coordinate_to_tuple, get_column_letter
+from openpyxl.worksheet._write_only import WriteOnlyWorksheet
+from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.worksheet.hyperlink import Hyperlink
 
 try:
@@ -73,7 +76,9 @@ except ImportError:
 CONFIG_NAMES = ("report.yaml", "report.yml", "report.json")
 TOC_SHEET, HELP_SHEET, FORMULAS_SHEET = "Содержание", "Справка по колонкам", "Формулы"
 EXCEL_MAX_ROWS, EXCEL_MAX_COLS, EXCEL_MAX_TEXT = 1_048_576, 16_384, 32_767
-BIG_SHEET_CELLS = 1_500_000              # больше — предупреждение о времени и памяти
+BIG_SHEET_CELLS = 1_500_000              # больше — предупреждение о времени (и памяти без потоковой записи)
+STREAM_BYTES = 2 * 1024 * 1024           # CSV в сумме больше (~25 тыс. строк) — потоковая запись
+                                         # (book.stream: auto | true | false); книга та же, память — в разы меньше
 try:
     csv.field_size_limit(sys.maxsize)
 except OverflowError:          # Windows: long — 32 бита
@@ -1058,7 +1063,67 @@ def colored_columns(rep, coloring):
     return out
 
 
+class Grid:
+    """Ячейки листа. Обычный режим — прямо в лист openpyxl. Потоковый (write-only, для больших книг) — ячейки
+    копятся по строкам и уходят в файл по порядку (flush), после чего память освобождается; вернуться к уже
+    записанной строке нельзя, поэтому всё, что выше данных, готовится заранее."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.stream = isinstance(ws, WriteOnlyWorksheet)
+        self.rows, self.written = {}, 0
+
+    def cell(self, row, column, value=None):
+        if not self.stream:
+            return self.ws.cell(row, column) if value is None else self.ws.cell(row, column, value)
+        if row <= self.written:
+            raise RuntimeError(f"строка {row} уже записана в потоковом режиме")
+        cells = self.rows.setdefault(row, {})
+        cell = cells.get(column)
+        if cell is None:
+            cell = cells[column] = WriteOnlyCell(self.ws)
+            cell.row, cell.column = row, column          # координата — для гиперссылок
+        if value is not None:
+            cell.value = value
+        return cell
+
+    def __getitem__(self, coord):                        # g["A1"]
+        return self.cell(*coordinate_to_tuple(coord))
+
+    def __setitem__(self, coord, value):                 # g["A1"] = …
+        self.cell(*coordinate_to_tuple(coord)).value = value
+
+    def merge(self, r1, c1, r2, c2):
+        if self.stream:
+            self.ws.merged_cells.add(f"{get_column_letter(c1)}{r1}:{get_column_letter(c2)}{r2}")
+        else:
+            self.ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
+
+    def flush(self, upto=None):
+        """Записать строки до upto включительно (по умолчанию — все накопленные)."""
+        if not self.stream:
+            return
+        upto = max(self.rows, default=self.written) if upto is None else upto
+        for r in range(self.written + 1, upto + 1):
+            cells = self.rows.pop(r, {})
+            self.ws.append([cells.get(c) for c in range(1, max(cells, default=0) + 1)])
+        self.written = max(self.written, upto)
+
+    # то, что у листа одинаково в обоих режимах (freeze_panes, sheet_view…), — прямо с листа: и чтение, и запись
+    _own = ("ws", "stream", "rows", "written")
+
+    def __getattr__(self, name):
+        return getattr(self.ws, name)
+
+    def __setattr__(self, name, value):
+        if name in Grid._own:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self.ws, name, value)
+
+
 def write_sheet(ws, rep, fc, cfg, st):
+    g = Grid(ws)
     style, table, coloring = cfg["style"], fc["table"], fc["coloring"]
     size = style["size"]
     cols = rep.columns
@@ -1069,15 +1134,15 @@ def write_sheet(ws, rep, fc, cfg, st):
     n = rep.n_rows
 
     # --- строки 1–4: ссылка, заголовок, подзаголовок, описание
-    link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
+    link(g.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
     title_col = 1 + offset
-    ws.cell(2, title_col, fc.get("title") or rep.title).font = st.font(16, True, P["title"], name=P["title_font"])
+    g.cell(2, title_col, fc.get("title") or rep.title).font = st.font(16, True, P["title"], name=P["title_font"])
     subtitle = fc.get("subtitle", cfg["book"].get("subtitle"))
     if subtitle:
-        ws.cell(3, title_col, subtitle).font = st.font(size, True, P["subtitle"], name=P["title_font"])
-    ws.cell(4, title_col, rep.description).font = st.font(size, False, P["muted"], name=P["title_font"])
+        g.cell(3, title_col, subtitle).font = st.font(size, True, P["subtitle"], name=P["title_font"])
+    g.cell(4, title_col, rep.description).font = st.font(size, False, P["muted"], name=P["title_font"])
     for r in (2, 3, 4):
-        ws.cell(r, title_col).alignment = st.align("left")
+        g.cell(r, title_col).alignment = st.align("left")
 
     totals_on = not rep.hierarchy and str(table.get("totals", "auto")).lower() not in ("off", "false", "0") \
         and any(c.additive for c in rep.metrics)
@@ -1085,7 +1150,6 @@ def write_sheet(ws, rep, fc, cfg, st):
     is_total = [isinstance(v, str) and bool(TOTAL_RE.match(v)) for v in first_col_text] if not rep.hierarchy else [False] * n
     if str(table.get("totals", "auto")).lower() == "auto" and any(is_total):
         totals_on = False
-    # строки: шапка -> «Итого» -> номера колонок (на них автофильтр) -> данные;
     # строки: шапка -> номера колонок -> «Итого» -> данные. Автофильтр встаёт на «Итого» (строку заголовков
     # фильтра Excel не фильтрует и не сортирует) — итог всегда на месте, фильтруются только данные
     two_level = any(c.group for c in cols)
@@ -1098,10 +1162,10 @@ def write_sheet(ws, rep, fc, cfg, st):
     # --- шапка
     if rep.row_numbers:
         for r in range(head1, head2 + 1):
-            st.head(ws, r, 1, size=10)
-        ws.cell(head1, 1).value = "№"
+            st.head(g, r, 1, size=10)
+        g.cell(head1, 1).value = "№"
         if two_level:
-            ws.merge_cells(start_row=head1, start_column=1, end_row=head2, end_column=1)
+            g.merge(head1, 1, head2, 1)
     j = 0
     while j < len(cols):
         c = cols[j]
@@ -1116,33 +1180,33 @@ def write_sheet(ws, rep, fc, cfg, st):
                 k += 1
             gfill = P["group_fill_delta"] if str(c.group).startswith("Δ") else P["group_fill_year"]
             for m in range(j, k + 1):
-                st.head(ws, head1, col_idx[id(cols[m])], fill=gfill)
+                st.head(g, head1, col_idx[id(cols[m])], fill=gfill)
                 mk = cols[m].kind
-                st.head(ws, head2, col_idx[id(cols[m])], cols[m].label, head_fill(mk),
+                st.head(g, head2, col_idx[id(cols[m])], cols[m].label, head_fill(mk),
                         P["head_delta_text"] if mk in ("delta", "delta_pct") else P["head_text"])
-            ws.cell(head1, ci).value = c.group
+            g.cell(head1, ci).value = c.group
             if k > j:
-                ws.merge_cells(start_row=head1, start_column=ci, end_row=head1, end_column=col_idx[id(cols[k])])
+                g.merge(head1, ci, head1, col_idx[id(cols[k])])
             j = k + 1
             continue
         for r in range(head1, head2 + 1):
-            st.head(ws, r, ci, fill=fill, color=color, size=hsize)
-        put(ws, head1, ci, c.label)
+            st.head(g, r, ci, fill=fill, color=color, size=hsize)
+        put(g, head1, ci, c.label)
         if two_level and c.role not in ("service", "subrow"):   # служебные — без объединения, скрываются по одной
-            ws.merge_cells(start_row=head1, start_column=ci, end_row=head2, end_column=ci)
+            g.merge(head1, ci, head2, ci)
         elif two_level:
-            ws.cell(head1, ci).value = "служебная"
-            ws.cell(head1, ci).font = st.font(9, True, P["muted"])
-            put(ws, head2, ci, c.label)
+            g.cell(head1, ci).value = "служебная"
+            g.cell(head1, ci).font = st.font(9, True, P["muted"])
+            put(g, head2, ci, c.label)
         j += 1
     if numbers_row:
         for ci in range(1, ncols + 1):
-            cell = ws.cell(numbers_row, ci, "+" if (ci == 1 and rep.row_numbers) else ci - offset)
+            cell = g.cell(numbers_row, ci, "+" if (ci == 1 and rep.row_numbers) else ci - offset)
             cell.font = st.font(10, False, P["numbers"])
             cell.alignment = st.align("center")
             cell.border = DATA_BORDER
 
-    # --- данные
+    # --- подготовка данных
     levels = rep.level.values if rep.hierarchy else [None] * n
     is_sub = subrow_flags(cols, n) if rep.hierarchy else [False] * n
     if rep.hierarchy:
@@ -1162,9 +1226,7 @@ def write_sheet(ws, rep, fc, cfg, st):
     pct_cap = coloring["pct_cap"]
     live = str(table.get("formulas", "values")).lower() == "live"
     tech = []          # (колонка, ячейки, формула/правило, пояснение) -> лист «Формулы» и примечания к заголовкам
-    head_cell = {}     # колонка -> ячейка подписи в шапке (для примечания)
-    for c in cols:
-        head_cell[id(c)] = ws.cell(head2 if (two_level and c.group) else head1, col_idx[id(c)])
+    head_cell = {id(c): g.cell(head2 if (two_level and c.group) else head1, col_idx[id(c)]) for c in cols}
 
     # раскраска Δ / Δ% (заливкой) — заранее, чтобы стиль каждой ячейки записать один раз
     mode = str(coloring.get("mode", "static")).lower()
@@ -1179,56 +1241,8 @@ def write_sheet(ws, rep, fc, cfg, st):
                     if color:
                         per_row[i] = st.fill(color)
                         n_colored += 1
-    align_center, align_left = st.align("center"), st.align("left")
-    first_ci, last_ci = 1, ncols
-    ws.sheet_format.defaultRowHeight = 18.75 * size / 14      # высота строк данных — по умолчанию листа
-    ws.sheet_format.customHeight = True
-    check_cells = getattr(rep, "check_cells", set())
-    alert_font = st.font(None, True, P["alert"])
-    outline = rep.hierarchy and bool(table.get("outline", True))
-    if outline:                       # группировка строк: кнопки +/− над группой (итог группы — сверху)
-        ws.sheet_properties.outlinePr.summaryBelow = False
 
-    for i in range(n):
-        r = first_data + i
-        lvl = levels[i]
-        last = i == n - 1
-        if outline and lvl:
-            ws.row_dimensions[r].outline_level = min(int(lvl), 7)
-        if rep.hierarchy:
-            fill = level_fill(lvl) if (not is_leaf[i] or lvl == 0) else None
-            bold = lvl <= 1
-        else:
-            fill = P["total"] if is_total[i] else None
-            bold = is_total[i]
-        sub = is_sub[i]
-        fill_obj = st.fill(fill) if fill else None
-        if rep.row_numbers:
-            st.stamp(ws.cell(r, 1, i + 1), no_font, align_center, st.border(left=True, bottom=last))
-        for c in cols:
-            ci = col_idx[id(c)]
-            value = formula_text(c.formula, r, letter) if (c.formula and live) else c.values[i]
-            cell = put(ws, r, ci, value) if not (c.formula and live) else ws.cell(r, ci, value)
-            if c.role in ("service", "subrow"):
-                font, align = service_font, align_left
-            elif c.role == "name":
-                font, align = (sub_font if sub else st.font(None, bold)), st.align("left", indent=min(lvl or 0, 15))
-            elif c.is_metric:
-                font, align = (sub_font if sub else st.font(None, bold)), align_center
-            else:
-                font, align = st.font(None, bold), (align_left if c.kind == "text" else align_center)
-            fmt = c.fmt or "General"
-            if c.cap and isinstance(c.values[i], (int, float)) and c.values[i] > pct_cap:
-                fmt = FMT_PCT_CAP
-            fill = fill_obj
-            if fill is None:
-                fill = color_at.get(id(c), {}).get(i) or (key_fill if (c is key_metric and not sub) else None)
-            border = st.border(left=ci == first_ci, right=ci == last_ci, bottom=last)
-            if (i, id(c)) in check_cells:          # сверка: строка ≠ сумме строк ниже
-                font = alert_font
-            st.stamp(cell, font, align, border, fill, fmt)
-
-    # --- строка «Итого» под шапкой (SUBTOTAL 109 — только видимые после фильтра строки)
+    # --- строка «Итого» под номерами колонок (до данных: в потоковом режиме назад не вернуться)
     if total_row:
         label_col = col_idx[id(cols[0])]
         if rep.row_numbers:
@@ -1245,7 +1259,7 @@ def write_sheet(ws, rep, fc, cfg, st):
                                  else (x / y - 1 if y else None))
         for c in cols:
             ci = col_idx[id(c)]
-            cell = ws.cell(total_row, ci)
+            cell = g.cell(total_row, ci)
             L = letter[id(c)]
             if c.additive and not c.formula:
                 text = f"=SUBTOTAL(109,{L}{first_data}:{L}{last_data})"
@@ -1262,17 +1276,17 @@ def write_sheet(ws, rep, fc, cfg, st):
             cell.border = DATA_BORDER
             cell.alignment = st.align("center")
         if not rep.row_numbers:   # подпись — в первую свободную ячейку (первая колонка может быть метрикой)
-            label_col = next((col_idx[id(c)] for c in cols if ws.cell(total_row, col_idx[id(c)]).value is None),
+            label_col = next((col_idx[id(c)] for c in cols if g.cell(total_row, col_idx[id(c)]).value is None),
                              label_col)
-        cell = ws.cell(total_row, label_col)
+        cell = g.cell(total_row, label_col)
         if cell.value is None:
             cell.value = "Итого (по видимым строкам)" if live else "Итого"
             cell.alignment = st.align("left")
         if rep.row_numbers:
             cell.fill, cell.font, cell.border = st.fill(P["total"]), st.font(10, True), DATA_BORDER
-        ws.row_dimensions[total_row].height = 18.75 * size / 14
+        g.row_dimensions[total_row].height = 18.75 * size / 14
 
-    # --- формулы колонок: добавленные Δ / Δ% и подсказки для Δ из CSV
+    # --- формулы колонок: добавленные Δ / Δ% и подсказки для Δ из CSV; правила раскраски
     for c in cols:
         spec = c.formula or c.hint
         if spec and n:
@@ -1283,7 +1297,6 @@ def write_sheet(ws, rep, fc, cfg, st):
             tech.append((c, f"{L}{first_data}:{L}{last_data}", formula_text(spec, first_data, letter),
                          note + f"; вставить в {L}{first_data} и протянуть вниз"))
     for c in targets:
-        ci = col_idx[id(c)]
         grow, fall = colors_for(c, coloring)
         cells, n_ranges = ranges_text(letter[id(c)], first_data, blocks)
         rule = (f"Цветовая шкала (3 цвета): минимум — #{fall}, число 0 — #FFFFFF, максимум — #{grow}"
@@ -1294,15 +1307,13 @@ def write_sheet(ws, rep, fc, cfg, st):
                         f"; в файле цвет записан заливкой, насыщенность = доля^{coloring['gamma']} "
                         "(средние значения бледнее, чем в шкале Excel)")))
         if mode == "conditional":
-            grow, fall = colors_for(c, coloring)
             for block in blocks:
                 for a, b in contiguous(block):
                     ref = f"{letter[id(c)]}{first_data + a}:{letter[id(c)]}{first_data + b}"
-                    ws.conditional_formatting.add(ref, ColorScaleRule(
+                    g.conditional_formatting.add(ref, ColorScaleRule(
                         start_type="min", start_color=fall, mid_type="num", mid_value=0, mid_color=CF_WHITE,
                         end_type="max", end_color=grow))
                     n_colored += b - a + 1
-
     rep.tech = tech
     if cfg["book"].get("header_notes", True):
         by_col = {}
@@ -1314,11 +1325,11 @@ def write_sheet(ws, rep, fc, cfg, st):
                 head_cell[id(c)].comment = Comment(body, "report_builder", width=420,
                                                    height=min(400, 60 + 18 * body.count("\n") + len(body) // 3))
 
-    # --- внешняя рамка таблицы (палитра B: внешняя #9AA5B1, внутренние #D3D9DF)
+    # --- внешняя рамка шапки (палитра B: внешняя #9AA5B1, внутренние #D3D9DF); у данных — в цикле ниже
     if P["outer_border"] and n:
-        frame(ws, head1, first_data - 1, 1, ncols, P["outer_border"], bottom_edge=False)
+        frame(g, head1, first_data - 1, 1, ncols, P["outer_border"], bottom_edge=False)
 
-    # --- ширины
+    # --- ширины (в потоковом режиме — до первой строки)
     widths = {}
     scale = size / 14
     for c in cols:
@@ -1347,28 +1358,28 @@ def write_sheet(ws, rep, fc, cfg, st):
     if rep.row_numbers:
         widths[1] = max(5, len(str(n)) * 1.2 + 2)
     for ci, w in widths.items():
-        ws.column_dimensions[get_column_letter(ci)].width = w
+        g.column_dimensions[get_column_letter(ci)].width = w
     for c in cols:
         if c.hidden:
-            ws.column_dimensions[letter[id(c)]].hidden = True
+            g.column_dimensions[letter[id(c)]].hidden = True
     # высота шапки — по самому длинному переносу
     lines = max((wrapped_lines(c.label, (widths[col_idx[id(c)]] - 1) / (HEAD_CHAR_W * scale)) for c in cols), default=1)
     lines = min(lines, 6)
     if two_level:
-        ws.row_dimensions[head1].height = 21 * scale
-        ws.row_dimensions[head2].height = max(21, 18 * lines) * scale
+        g.row_dimensions[head1].height = 21 * scale
+        g.row_dimensions[head2].height = max(21, 18 * lines) * scale
     else:
-        ws.row_dimensions[head1].height = max(21, 18 * lines) * scale
+        g.row_dimensions[head1].height = max(21, 18 * lines) * scale
     if numbers_row:
-        ws.row_dimensions[numbers_row].height = 13.5
+        g.row_dimensions[numbers_row].height = 13.5
 
-    # --- вид, фильтр, закрепление, печать
-    ws.sheet_view.showGridLines = False
+    # --- вид, закрепление, фильтр, печать (в потоковом режиме — до первой строки)
+    g.sheet_view.showGridLines = False
     if style.get("view") == "page_break":
-        ws.sheet_view.view = "pageBreakPreview"
-        ws.sheet_view.zoomScaleSheetLayoutView = style["zoom"]
-    ws.sheet_view.zoomScale = style["zoom"]
-    ws.sheet_view.zoomScaleNormal = style["zoom"]
+        g.sheet_view.view = "pageBreakPreview"
+        g.sheet_view.zoomScaleSheetLayoutView = style["zoom"]
+    g.sheet_view.zoomScale = style["zoom"]
+    g.sheet_view.zoomScaleNormal = style["zoom"]
     fcols = table.get("freeze_columns", "auto")
     if fcols == "auto":
         lead = 0
@@ -1377,13 +1388,65 @@ def write_sheet(ws, rep, fc, cfg, st):
                 break
             lead += 1
         fcols = lead if 0 < lead <= 3 and sum(widths[col_idx[id(c)]] for c in cols[:lead]) <= 100 else (1 if lead else 0)
-    ws.freeze_panes = ws.cell(first_data, offset + 1 + int(fcols))
+    g.freeze_panes = f"{get_column_letter(offset + 1 + int(fcols))}{first_data}"
     filter_row = total_row or numbers_row or head2
     if not rep.hierarchy and table.get("autofilter", True) and n:
-        ws.auto_filter.ref = f"A{filter_row}:{get_column_letter(ncols)}{last_data}"
-    total_width = sum(w for ci, w in widths.items() if not ws.column_dimensions[get_column_letter(ci)].hidden)
+        g.auto_filter.ref = f"A{filter_row}:{get_column_letter(ncols)}{last_data}"
+    total_width = sum(w for ci, w in widths.items() if not g.column_dimensions[get_column_letter(ci)].hidden)
     paper = style.get("paper", "auto")
     print_setup(ws, style, f"{head1}:{filter_row}", paper == "A3" or (paper == "auto" and total_width > 180))
+    g.sheet_format.defaultRowHeight = 18.75 * size / 14      # высота строк данных — по умолчанию листа
+    g.sheet_format.customHeight = True
+    check_cells = getattr(rep, "check_cells", set())
+    alert_font = st.font(None, True, P["alert"])
+    outline = rep.hierarchy and bool(table.get("outline", True))
+    if outline:                       # группировка строк: кнопки +/− над группой (итог группы — сверху)
+        g.sheet_properties.outlinePr.summaryBelow = False
+    g.flush(first_data - 1)           # шапка и «Итого» готовы — в файл
+
+    # --- данные: строка за строкой (в потоковом режиме каждая строка сразу уходит в файл)
+    align_center, align_left = st.align("center"), st.align("left")
+    first_ci, last_ci = 1, ncols
+    for i in range(n):
+        r = first_data + i
+        lvl = levels[i]
+        last = i == n - 1
+        if outline and lvl:
+            g.row_dimensions[r].outline_level = min(int(lvl), 7)
+        if rep.hierarchy:
+            fill = level_fill(lvl) if (not is_leaf[i] or lvl == 0) else None
+            bold = lvl <= 1
+        else:
+            fill = P["total"] if is_total[i] else None
+            bold = is_total[i]
+        sub = is_sub[i]
+        fill_obj = st.fill(fill) if fill else None
+        if rep.row_numbers:
+            st.stamp(g.cell(r, 1, i + 1), no_font, align_center, st.border(left=True, bottom=last))
+        for c in cols:
+            ci = col_idx[id(c)]
+            value = formula_text(c.formula, r, letter) if (c.formula and live) else c.values[i]
+            cell = put(g, r, ci, value) if not (c.formula and live) else g.cell(r, ci, value)
+            if c.role in ("service", "subrow"):
+                font, align = service_font, align_left
+            elif c.role == "name":
+                font, align = (sub_font if sub else st.font(None, bold)), st.align("left", indent=min(lvl or 0, 15))
+            elif c.is_metric:
+                font, align = (sub_font if sub else st.font(None, bold)), align_center
+            else:
+                font, align = st.font(None, bold), (align_left if c.kind == "text" else align_center)
+            fmt = c.fmt or "General"
+            if c.cap and isinstance(c.values[i], (int, float)) and c.values[i] > pct_cap:
+                fmt = FMT_PCT_CAP
+            fill = fill_obj
+            if fill is None:
+                fill = color_at.get(id(c), {}).get(i) or (key_fill if (c is key_metric and not sub) else None)
+            border = st.border(left=ci == first_ci, right=ci == last_ci, bottom=last)
+            if (i, id(c)) in check_cells:          # сверка: строка ≠ сумме строк ниже
+                font = alert_font
+            st.stamp(cell, font, align, border, fill, fmt)
+        g.flush(r)
+    g.flush()
     return n_colored, len(blocks)
 
 
@@ -1569,9 +1632,19 @@ def build(src_dir, cfg, out_path, explain=False):
         sys.exit(f"В папке {src_dir} нет CSV-файлов")
     all_files = [f for f, _ in files]
     period = book.get("period") or ""
-    wb = Workbook()
-    toc = wb.active
-    toc.title = TOC_SHEET
+    # потоковая запись (write-only): строки сразу уходят в файл — память не растёт с размером данных;
+    # auto — если CSV в сумме больше STREAM_BYTES
+    stream = book.get("stream", "auto")
+    if str(stream).lower() == "auto":
+        stream = sum(os.path.getsize(os.path.join(src_dir, f)) for f in all_files) > STREAM_BYTES
+    stream = bool(stream) and str(stream).lower() not in ("false", "off", "0")
+    wb = Workbook(write_only=stream)
+    if stream:
+        toc = wb.create_sheet(TOC_SHEET)
+        print("Потоковая запись: большие файлы — строки пишутся сразу в файл (меньше памяти).")
+    else:
+        toc = wb.active
+        toc.title = TOC_SHEET
     used = {TOC_SHEET.lower(), HELP_SHEET.lower(), FORMULAS_SHEET.lower()}
     entries, skipped, help_rows = [], [], {}
 
@@ -1597,10 +1670,11 @@ def build(src_dir, cfg, out_path, explain=False):
             continue
         name = sheet_title(fc.get("sheet") or default_sheet_name(f, all_files), used)
         cells = rep.n_rows * len(rep.columns)
-        if cells > BIG_SHEET_CELLS:   # замер: 200 тыс. строк × 18 колонок ≈ 1,5 мин и ≈ 1,8 ГБ памяти
+        if cells > BIG_SHEET_CELLS:   # замер: 200 тыс. строк × 18 колонок ≈ 1,5 мин (потоком — ~0,4 ГБ памяти)
             print(f"   [!] {f}: большой лист ({rep.n_rows:,} строк × {len(rep.columns)} колонок) — сборка займёт "
-                  f"~{max(1, round(cells / 2_500_000 * 1.5))} мин и ~{cells / 2_000_000:.1f} ГБ памяти; "
-                  "для отчёта лучше агрегировать данные".replace(",", " "))
+                  f"~{max(1, round(cells / 2_500_000 * 1.5))} мин"
+                  + ("" if stream else f" и ~{cells / 2_000_000:.1f} ГБ памяти (потоковая запись: book.stream: true)")
+                  + "; для отчёта лучше агрегировать данные".replace(",", " "))
         ws = wb.create_sheet(name)
         try:
             n_colored, n_blocks = write_sheet(ws, rep, fc, cfg, st)
@@ -1638,6 +1712,7 @@ def build(src_dir, cfg, out_path, explain=False):
 
 
 def write_toc(ws, entries, skipped, cfg, src_dir, st):
+    ws = Grid(ws)                     # обычный или потоковый лист — одинаково
     book = cfg["book"]
     ws.sheet_view.showGridLines = False
     title = book.get("title") or os.path.basename(src_dir.rstrip("\\/"))
@@ -1696,14 +1771,15 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
             ws.cell(row, 3, reason).font = st.font(11, False, P["muted"])
     for col, width in zip("ABCDEFGHIJ", (5, 32, 60, 45, 45, 9, 24, 16, 40, 50)):
         ws.column_dimensions[col].width = width
-    ws.freeze_panes = ws.cell(head_row + 1, 1)
+    ws.freeze_panes = f"A{head_row + 1}"
     print_setup(ws, cfg["style"], f"{head_row}:{head_row}")
+    ws.flush()
 
 
 def print_setup(ws, style, title_rows=None, a3=False):
     if title_rows:
         ws.print_title_rows = title_rows
-    ws.page_setup.paperSize = ws.PAPERSIZE_A3 if a3 else ws.PAPERSIZE_A4
+    ws.page_setup.paperSize = Worksheet.PAPERSIZE_A3 if a3 else Worksheet.PAPERSIZE_A4   # константы класса: у потокового листа их нет
     ws.page_setup.orientation = style.get("orientation", "landscape")
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
@@ -1719,6 +1795,7 @@ def print_setup(ws, style, title_rows=None, a3=False):
 def write_formulas(ws, entries, st, style):
     """Формулы и правила раскраски текстом: скопировать из колонки «Формула / правило» в первую ячейку диапазона
     и протянуть вниз (ссылки относительные)."""
+    ws = Grid(ws)                     # обычный или потоковый лист — одинаково
     ws.sheet_view.showGridLines = False
     link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
     ws.cell(2, 1, "Формулы и правила раскраски").font = st.font(16, True, P["title"], name=P["title_font"])
@@ -1749,9 +1826,11 @@ def write_formulas(ws, entries, st, style):
     ws.freeze_panes = "A6"
     ws.auto_filter.ref = f"A5:E{r}"
     print_setup(ws, style, "5:5")
+    ws.flush()
 
 
 def write_help(ws, rows, st, style):
+    ws = Grid(ws)                     # обычный или потоковый лист — одинаково
     ws.sheet_view.showGridLines = False
     link(ws.cell(1, 1), TOC_SHEET, st, 10, "← Содержание")
     ws.cell(2, 1, "Справка по колонкам").font = st.font(16, True, P["title"], name=P["title_font"])
@@ -1773,6 +1852,7 @@ def write_help(ws, rows, st, style):
     ws.freeze_panes = "A5"
     ws.auto_filter.ref = f"A4:F{r}"
     print_setup(ws, style, "4:4")
+    ws.flush()
 
 
 # ---------------------------------------------------------------- уточняющие вопросы

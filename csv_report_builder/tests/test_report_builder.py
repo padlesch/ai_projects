@@ -438,3 +438,32 @@ def test_code_columns_are_not_summed(tmp_path):
     assert [ws.cell(r, 1).value for r in (5, 6, 7, 8, 9)] == ["ORD", 1, 1, 2, 0]   # шапка, номера, данные
     assert isinstance(ws.cell(9, 1).value, int) and "\\-" not in ws.cell(9, 1).number_format   # 0, а не «-»
     assert R.is_code_name("ORD") and R.is_code_name("CASE_TYPE") and not R.is_code_name("Order amount 2026")
+
+
+def test_streaming_writes_the_same_book(tmp_path):
+    """Потоковая запись (большие книги) даёт ту же книгу, что обычная: значения, стили, объединения, закрепление,
+    фильтр, ширины, примечания, группировка, ссылки."""
+    write_csv(tmp_path / "rep_1_5.csv", HEAD, [[0, "Всего", "", "", "", 600, 60.0, 500, 50.0],
+                                               [1, "Хирургия", "Хирургия", "", "", 100, 40.0, 90, 30.0],
+                                               [1, "из них операции", "Хирургия", "", "операции", 10, 1.0, 10, 1.0],
+                                               [2, "Хир 1", "Хирургия", "Хир 1", "", 50, 20.0, 40, 10.0]])
+    write_raw(tmp_path / "sum.csv", "Регион;Случаи 2026;Случаи 2025;Код\nМосква;5;4;001\nКазань;3;0;002\n")
+    books = {}
+    for stream in (False, True):
+        out = str(tmp_path / f"s{stream}.xlsx")
+        R.build(str(tmp_path), R.deep_merge(R.DEFAULTS, {"book": {"stream": stream}}), out)
+        books[stream] = load_workbook(out)
+    a, b = books[False], books[True]
+    assert a.sheetnames == b.sheetnames
+    for name in a.sheetnames:
+        x, y = a[name], b[name]
+        assert (x.freeze_panes, x.auto_filter.ref, x.sheet_state) == (y.freeze_panes, y.auto_filter.ref, y.sheet_state)
+        assert set(map(str, x.merged_cells.ranges)) == set(map(str, y.merged_cells.ranges))
+        for r in range(1, x.max_row + 1):
+            assert (x.row_dimensions[r].outline_level or 0) == (y.row_dimensions[r].outline_level or 0)
+            for c in range(1, x.max_column + 1):
+                p, q = x.cell(r, c), y.cell(r, c)
+                assert (p.value, p.number_format, p.font.b, p.fill.fgColor.rgb, p.border.left.style,
+                        bool(p.comment), bool(p.hyperlink)) == \
+                       (q.value, q.number_format, q.font.b, q.fill.fgColor.rgb, q.border.left.style,
+                        bool(q.comment), bool(q.hyperlink)), (name, p.coordinate)
