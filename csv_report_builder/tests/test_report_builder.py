@@ -149,38 +149,64 @@ def answers(*items):
     return R.Asker(inp=lambda prompt: next(it), out=lambda *a: None)
 
 
-def test_plan_asks_only_unsure_things(ambiguous_dir):
+def test_plan_groups_files_by_structure(ambiguous_dir):
+    for k in range(3):                                         # ещё 3 файла той же структуры и 1 другой
+        write_csv(ambiguous_dir / f"mo_{k}.csv", ["MO_NAME", "OKATO_REG", "Случаи 2026", "Случаи 2025", "Балл",
+                                                  "Показатель"], [["ГКБ", "450", 1, 2, "1,5", 7]])
+    write_csv(ambiguous_dir / "other.csv", ["Товар", "Цена"], [["a", "1,5"]])
     cfg = R.deep_merge(R.DEFAULTS, {})
     plan = R.plan_questions(str(ambiguous_dir), cfg, {})
-    assert [c.name for c in plan["kinds"]] == ["Балл", "Показатель"]      # «Случаи» понятны по имени
-    assert plan["kinds"][1].maybe_code                                     # все значения разные
-    assert {c.name for c in plan["labels"]} == {"MO_NAME", "OKATO_REG"}
+    assert len(plan["reports"]) == 5 and len(plan["structures"]) == 2 and len(plan["todo"]) == 2
     assert "positive_is" in plan["book"] and "period" in plan["book"]
 
 
 def test_interview_saves_answers_and_stops_asking(ambiguous_dir):
     cfg = R.deep_merge(R.DEFAULTS, {})
+    # колонки структуры: 1 MO_NAME, 2 OKATO_REG, 3 Случаи 2026, 4 Случаи 2025, 5 Δ Случаи, 6 Δ% Случаи,
+    #                    7 Балл, 8 Показатель
     raw, changed = R.interview(str(ambiguous_dir), cfg, {}, answers(
         "Анализ МО", "", "9м", "2",          # заголовок, подзаголовок, период, рост — хорошо
-        "3", "",                             # Балл — другое число; Показатель — по умолчанию (код)
-        "МО", "",                            # подписи техн. имён
-        "МО", ""))                           # имя листа, описание
+        "7,8", "3", "7",                     # вид: Балл -> другое число, Показатель -> разрез
+        "6",                                 # подсвечивать только Δ%
+        "",                                  # главная метрика — по умолчанию
+        "2",                                 # строка «Итого» — нет
+        "МО", "",                            # подписи техн. имён: MO_NAME -> МО, OKATO_REG — как есть
+        ""))                                 # имена листов — как в списке
     assert changed
     assert raw["book"] == {"title": "Анализ МО", "subtitle": "", "period": "9м"}
     assert raw["coloring"]["positive_is"] == "good"
-    assert raw["columns"]["Балл"] == {"kind": "number", "role": "metric"}
+    assert raw["columns"]["Балл"] == {"role": "metric", "kind": "number"}
     assert raw["columns"]["Показатель"] == {"role": "dimension"}
     assert raw["columns"]["MO_NAME"]["label"] == "МО"
-    assert raw["files"]["mo.csv"] == {"sheet": "МО"}
+    assert raw["files"]["mo.csv"] == {"coloring": {"columns": ["Δ% Случаи"]}, "table": {"totals": "off"},
+                                      "sheet": "mo"}
     cfg = R.deep_merge(R.DEFAULTS, raw)
-    assert R.plan_questions(str(ambiguous_dir), cfg, raw)["count"] == 0
+    assert R.plan_questions(str(ambiguous_dir), cfg, raw)["count"] == 0     # второй раз — без вопросов
+    ws = build(ambiguous_dir, **raw).worksheets[1]
+    assert ws.cell(5, 1).value == "МО" and ws.cell(7, 1).value != "Итого"
+
+
+def test_kind_change_applies_to_all_years(ambiguous_dir):
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    raw, _ = R.interview(str(ambiguous_dir), cfg, {}, answers("", "", "", "", "3", "2", "!"))
+    assert raw["columns"]["Случаи 2026"]["kind"] == raw["columns"]["Случаи 2025"]["kind"] == "money"
+
+
+def test_bad_numbers_reasked(ambiguous_dir):
+    cfg = R.deep_merge(R.DEFAULTS, {})
+    said = []
+    it = iter(["", "", "", "", "99", "abc", "", "!"])
+    asker = R.Asker(inp=lambda p: next(it), out=lambda *a: said.append(" ".join(map(str, a))))
+    R.interview(str(ambiguous_dir), cfg, {}, asker)
+    assert sum("не понял" in x for x in said) == 2
 
 
 def test_bang_accepts_all_defaults(ambiguous_dir):
     cfg = R.deep_merge(R.DEFAULTS, {})
     raw, _ = R.interview(str(ambiguous_dir), cfg, {}, answers("!"))
     assert raw["book"]["title"] == ambiguous_dir.name
-    assert raw["columns"]["Показатель"] == {"role": "dimension"}
+    assert raw["files"]["mo.csv"] == {"sheet": "mo"}
+    assert "Показатель" not in raw["columns"]            # без ответа вид не записывается — решает автоматика
 
 
 def test_column_group_colours_and_no_sum_for_numbers(ambiguous_dir):
@@ -193,3 +219,79 @@ def test_column_group_colours_and_no_sum_for_numbers(ambiguous_dir):
     assert heads["Случаи"] == "DCE8F3" and heads["Балл"] == "D6ECEC"
     total = {ws.cell(5, c).value: ws.cell(7, c).value for c in range(1, ws.max_column + 1)}
     assert total["Балл"] is None                              # баллы в «Итого» не складываются
+
+
+# ---------------------------------------------------------------- крайние случаи CSV
+def write_raw(path, text, encoding="utf-8"):
+    with open(path, "w", encoding=encoding, newline="") as f:
+        f.write(text)
+
+
+def test_read_ragged_dups_blank_lines_trailing_delims(tmp_path):
+    p = tmp_path / "x.csv"
+    write_raw(p, "Регион;Сумма;Сумма;\n\nМосква;1;2;\nКазань;3;4;5;лишнее\n\n")
+    df, enc, sep, notes = R.read_csv_any(str(p))
+    assert sep == ";" and list(df.columns) == ["Регион", "Сумма", "Сумма (2)", "Колонка 4", "Колонка 5"]
+    assert df.values.tolist() == [["Москва", "1", "2", "", ""], ["Казань", "3", "4", "5", "лишнее"]]
+    assert any("лишними полями" in n for n in notes) and any("Сумма (2)" in n for n in notes)
+
+
+def test_read_utf16_quotes_newlines_pipe(tmp_path):
+    write_raw(tmp_path / "u.csv", "Регион\tСумма\nМосква\t1,5\n", encoding="utf-16")
+    df, enc, sep, _ = R.read_csv_any(str(tmp_path / "u.csv"))
+    assert enc == "utf-16" and sep == "\t" and df.iloc[0, 1] == "1,5"
+    write_raw(tmp_path / "q.csv", 'Клиент,Комментарий,Сумма\n"ООО ""Р""","a\nb; c",1\n')
+    df, _, sep, _ = R.read_csv_any(str(tmp_path / "q.csv"))
+    assert sep == "," and df.iloc[0].tolist() == ['ООО "Р"', "a\nb; c", "1"]
+
+
+def test_read_rejects_binary_and_empty(tmp_path):
+    (tmp_path / "b.csv").write_bytes(bytes(range(256)))
+    with pytest.raises(ValueError, match="не текстовый"):
+        R.read_csv_any(str(tmp_path / "b.csv"))
+    write_raw(tmp_path / "e.csv", "\ufeff\n\n")
+    with pytest.raises(ValueError, match="пустой"):
+        R.read_csv_any(str(tmp_path / "e.csv"))
+
+
+def test_numbers_brackets_currency_inf():
+    nums, _ = R.to_numbers(pd.Series(["(150)", "1 000 ₽", "$5", "inf", "1.5E+3"]))
+    assert nums.iloc[:3].tolist() == [-150.0, 1000.0, 5.0] and pd.isna(nums.iloc[3]) and nums.iloc[4] == 1500
+
+
+def test_dates_strict_no_day_month_swap():
+    d, fmt = R.parse_dates(pd.Series(["2026-02-01", "2026-13-01", "2025-12-31"]))
+    assert fmt == "%Y-%m-%d" and d.iloc[0].month == 2 and pd.isna(d.iloc[1])
+    d, fmt = R.parse_dates(pd.Series(["01.02.2026", "31.12.2025 23:59"]))
+    assert d.iloc[0].month == 2 and d.iloc[1].hour == 23
+
+
+def test_bad_values_do_not_break_book(tmp_path):
+    write_raw(tmp_path / "a.csv", "Имя;Значение;Сумма\n=1+1;@x;10\nА\x01Б;" + "Я" * 40000 + ";20\n")
+    write_raw(tmp_path / "b.csv", "")
+    (tmp_path / "c.csv").write_bytes(b"\x00\x01\x02")
+    wb = build(tmp_path)
+    ws = wb.worksheets[1]
+    rows = [r for r in ws.iter_rows(min_row=8, values_only=False) if r[0].value is not None]
+    assert rows[0][0].value == "=1+1" and rows[0][0].data_type == "s"         # не формула
+    assert rows[1][0].value == "АБ" and len(rows[1][1].value) == R.EXCEL_MAX_TEXT
+    toc = [r for r in wb[R.TOC_SHEET].iter_rows(values_only=True)]
+    assert any(r[1] == "b.csv" for r in toc) and any(r[1] == "c.csv" for r in toc)   # пропущенные — в содержании
+
+
+def test_hierarchy_without_name_column_and_level_gaps(tmp_path):
+    write_raw(tmp_path / "h.csv", "Уровень;MO;Сумма 2026;Сумма 2025\n0;;10;9\n2;ГКБ 2;1;1\n1;ГКБ 1;6;5\n")
+    ws = build(tmp_path).worksheets[1]
+    names = [r[1] for r in ws.iter_rows(min_row=8, values_only=True) if r[0] is not None]
+    assert names == ["Всего", "ГКБ 1", "ГКБ 2"]
+
+
+def test_many_files_and_no_files(tmp_path):
+    for k in range(40):
+        write_raw(tmp_path / f"r_{k}.csv", "Регион;Сумма\nМосква;1\n")
+    wb = build(tmp_path)
+    assert len(wb.sheetnames) == 40 + 3                 # + «Содержание», «Справка по колонкам», скрытые «Формулы»
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(SystemExit):
+        build(empty)

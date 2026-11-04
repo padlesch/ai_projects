@@ -25,9 +25,9 @@
   • ширина колонок по содержимому, закреплённая шапка, печать по ширине, «Страница N из M», ссылки
     «← Содержание» на каждом листе.
 
-Уточняющие вопросы: при запуске в консоли скрипт анализирует папку и спрашивает только то, в чём не уверен или
-чего нет в конфиге — заголовок, подзаголовок, период, «рост — хорошо или плохо», вид колонок, понятных лишь по
-цифрам (штуки / деньги / другое число / процент / код), подписи технических имён (MO_NAME), имена листов.
+Уточняющие вопросы: при запуске в консоли скрипт анализирует папку, группирует файлы по структуре (одинаковый
+набор колонок) и по каждой новой структуре показывает таблицу колонок с распознанным видом: поправить вид,
+выбрать, что подсвечивать, главную метрику, строку «Итого», подписи технических имён; затем имена листов.
 Enter — вариант в скобках, «!» — принять все остальные. Ответы сохраняются в report.yaml (прежний — в .bak),
 при следующем запуске спрашивается только новое. --ask — спросить всё заново, --no-ask — без вопросов.
 
@@ -51,6 +51,7 @@ import csv
 import datetime as dt
 import fnmatch
 import json
+import math
 import os
 import re
 import sys
@@ -58,6 +59,7 @@ import sys
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.comments import Comment
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -70,7 +72,12 @@ except ImportError:
 
 CONFIG_NAMES = ("report.yaml", "report.yml", "report.json")
 TOC_SHEET, HELP_SHEET, FORMULAS_SHEET = "Содержание", "Справка по колонкам", "Формулы"
-EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_ROWS, EXCEL_MAX_COLS, EXCEL_MAX_TEXT = 1_048_576, 16_384, 32_767
+BIG_SHEET_CELLS = 1_500_000              # больше — предупреждение о времени и памяти
+try:
+    csv.field_size_limit(sys.maxsize)
+except OverflowError:          # Windows: long — 32 бита
+    csv.field_size_limit(2 ** 31 - 1)
 
 # ---------------------------------------------------------------- настройки по умолчанию (переопределяются конфигом)
 DEFAULTS = {
@@ -273,37 +280,103 @@ def file_config(cfg, file_name):
 
 
 # ---------------------------------------------------------------- чтение CSV
-def read_csv_any(path):
-    """-> (DataFrame строк, кодировка, разделитель). Все значения — строки, пустые — ''."""
-    raw = open(path, "rb").read()
-    text = None
+def decode_bytes(raw):
+    """-> (текст, кодировка). UTF-16 / UTF-8 (с BOM и без) / Windows-1251; двоичный файл — ошибка."""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16"), "utf-16"
+    if b"\x00" in raw[:4096]:
+        raise ValueError("не текстовый файл (двоичные данные)")
     for enc in ("utf-8-sig", "cp1251"):
         try:
-            text, encoding = raw.decode(enc), enc
-            break
+            return raw.decode(enc), enc
         except UnicodeDecodeError:
             continue
-    if text is None:
-        raise ValueError("не удалось определить кодировку")
+    raise ValueError("не удалось определить кодировку")
+
+
+def detect_sep(text):
+    """Разделитель — тот, что даёт одинаковое число полей (>1) в большинстве первых строк; кавычки учитываются."""
+    lines = [ln for ln in text.splitlines()[:200] if ln.strip()][:60]
+    best, best_score = ";", (-1, 0, 0)
+    for sep in (";", "\t", ",", "|"):
+        counts = [len(r) for r in csv.reader(lines, delimiter=sep)]
+        if not counts:
+            continue
+        mode = max(set(counts), key=counts.count)
+        score = (int(mode > 1), counts.count(mode) / len(counts), mode)
+        if score > best_score:
+            best, best_score = sep, score
+    return best
+
+
+def read_csv_any(path):
+    """-> (DataFrame строк, кодировка, разделитель, замечания). Все значения — строки, пустые — ''.
+    Разбор сам (модуль csv): кавычки и переносы внутри поля, пустые строки пропускаются, короткие строки
+    дополняются, лишние поля — в колонки «Колонка N» (с замечанием), пустые/повторяющиеся имена колонок —
+    уникальные, пустая колонка от «;» в конце строки — убирается."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    text, encoding = decode_bytes(raw)
+    text = text.lstrip("\ufeff")
     if not text.strip():
         raise ValueError("пустой файл")
-    sample = "\n".join(text.splitlines()[:50])
-    try:
-        sep = csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
-    except csv.Error:
-        first = text.splitlines()[0]
-        sep = max(";,\t|", key=first.count)
-    from io import StringIO
-    df = pd.read_csv(StringIO(text), sep=sep, dtype=str, keep_default_na=False, na_filter=False,
-                     engine="python" if len(sep) > 1 else "c")
-    df.columns = [fix_header(c) for c in df.columns]
+    sep = detect_sep(text)
+    rows = [r for r in csv.reader(_lines(text), delimiter=sep)
+            if any(v.strip() for v in r)]
+    if not rows:
+        raise ValueError("пустой файл")
+    header, body = rows[0], rows[1:]
+    notes = []
+    width = max([len(header)] + [len(r) for r in body])
+    extra = [r for r in body if len(r) > len(header) and any(v.strip() for v in r[len(header):])]
+    if extra:
+        notes.append(f"{len(extra)} строк(и) с лишними полями — добавлены колонки «Колонка N»")
+    else:
+        width = len(header)
+    limit = EXCEL_MAX_COLS - 50          # запас под добавленные Δ / Δ% и служебные колонки
+    if width > limit:
+        notes.append(f"колонок {width} — больше, чем помещается на лист Excel; оставлены первые {limit}")
+        width = limit
+    header = (header + [""] * (width - len(header)))[:width]
+    body = [(r + [""] * (width - len(r)))[:width] for r in body]
+    names, seen = [], {}
+    for i, h in enumerate(header):
+        h = fix_header(h) or f"Колонка {i + 1}"
+        base = h
+        while h.lower() in seen:
+            seen[base.lower()] += 1
+            h = f"{base} ({seen[base.lower()]})"
+        seen.setdefault(h.lower(), 1)
+        names.append(h)
+    renamed = [n for n in names if re.search(r" \(\d+\)$", n) and n not in header]
+    if renamed:
+        notes.append("повторяющиеся имена колонок переименованы: " + ", ".join(renamed))
+    df = pd.DataFrame(body, columns=names, dtype=object).astype(str) if body else pd.DataFrame(columns=names)
     df = df.apply(lambda s: s.str.strip())
     df = df.mask(df.isin(NULLS), "")
-    return df, encoding, sep
+    bad = df.apply(lambda s: s.str.contains(ILLEGAL_CHARACTERS_RE)).to_numpy().sum() if len(df) else 0
+    if bad:
+        df = df.apply(lambda s: s.str.replace(ILLEGAL_CHARACTERS_RE, "", regex=True))
+        notes.append(f"{bad} знач. с управляющими символами — символы удалены")
+    long_ = df.apply(lambda s: s.str.len() > EXCEL_MAX_TEXT).to_numpy().sum() if len(df) else 0
+    if long_:
+        df = df.apply(lambda s: s.where(s.str.len() <= EXCEL_MAX_TEXT, s.str.slice(0, EXCEL_MAX_TEXT - 1) + "…"))
+        notes.append(f"{long_} знач. длиннее {EXCEL_MAX_TEXT} символов (лимит Excel) — обрезаны")
+    # колонка без имени и без значений (лишний «;» в конце строк) — не нужна
+    for i, h in enumerate(header):
+        if not h.strip() and len(df) and (df[names[i]] == "").all():
+            df = df.drop(columns=[names[i]])
+    return df, encoding, sep, notes
+
+
+def _lines(text):
+    """Строки для csv.reader с сохранением переводов строк внутри кавычек."""
+    import io
+    return io.StringIO(text, newline="")
 
 
 def fix_header(name):
-    name = str(name).strip().strip('"')
+    name = ILLEGAL_CHARACTERS_RE.sub("", str(name)).strip().strip('"')[:255]
     if name.startswith("?%") or name.startswith("? %"):
         return "Δ%" + name.split("%", 1)[1]
     if name.startswith("? "):
@@ -314,12 +387,16 @@ def fix_header(name):
 def to_numbers(series):
     """Строки -> float (NaN, где не число). Пробелы-разделители, десятичная запятая, «12,5%» (-> 0.125)."""
     s = series.str.replace(r"[\s\u00a0\u202f]", "", regex=True)
+    s = s.str.replace(r"(?i)(₽|руб\.?|р\.|\$|€|usd|eur|rub)$", "", regex=True).str.replace(r"^[$€₽]", "", regex=True)
+    neg = s.str.match(r"^\(.*\)$")                                 # (150) — бухгалтерский минус
+    s = s.where(~neg, "-" + s.str.slice(1, -1))
     pct = s.str.endswith("%")
     s = s.str.rstrip("%")
     both = s.str.contains(",", regex=False) & s.str.contains(".", regex=False)
     s = s.where(~both, s.str.replace(",", "", regex=False))        # 1,234.56 -> 1234.56
     s = s.str.replace(",", ".", regex=False)                        # 1234,56 -> 1234.56
     num = pd.to_numeric(s, errors="coerce")
+    num = num.where(~num.isin([math.inf, -math.inf]))                # inf в Excel не записать — не число
     return num.where(~pct, num / 100), bool(pct[series != ""].all()) if (series != "").any() else False
 
 
@@ -346,6 +423,9 @@ class Col:
         self.kind_source = "name"  # config | name | values — по значениям = не уверен, спросить
         self.maybe_code = False    # целые без подсказки в имени, все разные — возможно, код, а не метрика
         self.sample = []           # примеры значений для вопросов
+        self.notes = []            # замечания по колонке (в отчёт по файлу)
+        self.numeric_share = 0.0   # доля чисел среди значений (для подсказки «может, метрика?»)
+        self.odd_value = ""        # пример не-числа в почти числовой колонке
         self.nosum = False         # Δ от «другого числа» — не суммировать
 
     @property
@@ -356,6 +436,26 @@ class Col:
     def additive(self):
         # «другое число» (балл, коэффициент) и его Δ в «Итого» не суммируются
         return self.is_metric and self.kind in ("count", "money", "delta") and not self.nosum
+
+
+DATE_FORMATS = ["%d.%m.%Y", "%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y", "%d-%m-%Y", "%Y.%m.%d"]
+
+
+def parse_dates(series):
+    """Строгий разбор: для колонки выбирается формат (или пара «дата» + «дата время»), который распознаёт больше
+    всего значений. Никакого угадывания «день/месяц»: 2026-02-01 — 1 февраля, 2026-13-01 — не дата."""
+    filled = series.where(series != "")
+    best, best_n, best_fmt = None, -1, None
+    for fmt in DATE_FORMATS:
+        parsed = pd.to_datetime(filled, format=fmt, errors="coerce")
+        if " " in fmt or "T" in fmt:     # «дата время» вместе с «дата» без времени
+            short = pd.to_datetime(filled, format=fmt.split(" ")[0].split("T")[0], errors="coerce")
+            parsed = parsed.fillna(short)
+        n = int(parsed.notna().sum())
+        if n > best_n:
+            best, best_n, best_fmt = parsed, n, fmt
+    return best, (best_fmt if best_n > 0 else None)
 
 
 def norm(text):
@@ -385,6 +485,9 @@ def analyze_column(name, series, rule):
     col.role = role
 
     col.sample = list(dict.fromkeys(nonempty.head(200)))[:3]
+    col.numeric_share = float(numeric_share)
+    odd = nonempty[nums[series != ""].isna()] if len(nonempty) else nonempty
+    col.odd_value = odd.iloc[0] if len(odd) else ""
     if role == "metric":
         if kind is None:
             fractional = bool(((nums.dropna() % 1) != 0).any())
@@ -413,14 +516,17 @@ def analyze_column(name, series, rule):
         col.cap = kind == "delta_pct"
     elif role in ("dimension", "service") and kind in (None, "date", "datetime") and len(nonempty) \
             and nonempty.str.match(DATE_LIKE).mean() >= 0.98:
-        try:
-            dates = pd.to_datetime(series.where(series != ""), dayfirst=True, errors="coerce", format="mixed")
-        except (TypeError, ValueError):   # pandas < 2.0 — без format="mixed"
-            dates = pd.to_datetime(series.where(series != ""), dayfirst=True, errors="coerce")
-        if dates[series != ""].notna().all():
+        dates, fmt = parse_dates(series)
+        ok = dates[series != ""].notna()
+        if fmt and ok.mean() >= 0.9:      # дата — значением; не распознанные (30.02) — остаются текстом
             has_time = bool((dates.dropna().dt.time != dt.time(0)).any())
             col.kind = "datetime" if has_time else "date"
-            col.values = [None if pd.isna(v) else v.to_pydatetime() for v in dates]
+            col.values = [v if v == "" or v is None else (d.to_pydatetime() if not pd.isna(d) else v)
+                          for v, d in zip(series, dates)]
+            col.values = [None if v == "" else v for v in col.values]
+            if not ok.all():
+                col.notes.append(f"«{name}»: {int((~ok).sum())} знач. не похожи на дату "
+                                 f"(например «{series[series != ''][~ok].iloc[0]}») — оставлены текстом")
     if not col.values:
         if role == "level" and len(nonempty) and nums[series != ""].notna().all() \
                 and bool((nums.dropna() % 1 == 0).all()):
@@ -528,7 +634,7 @@ class Report:
 
 
 def prepare(path, file_name, fc, period):
-    df, encoding, sep = read_csv_any(path)
+    df, encoding, sep, notes = read_csv_any(path)
     if df.empty:
         raise ValueError("нет строк (только шапка)")
     rules = fc["columns"]
@@ -539,6 +645,7 @@ def prepare(path, file_name, fc, period):
         c = analyze_column(name, df[name], rule)
         if c.role != "skip":
             cols.append(c)
+    source_columns = list(cols)
     if not any(c.is_metric for c in cols):
         print(f"   [!] {file_name}: числовых колонок-метрик не найдено — лист без раскраски и итогов")
     level = next((c for c in cols if c.role == "level"), None)
@@ -547,6 +654,8 @@ def prepare(path, file_name, fc, period):
         level = None
     rep = Report()
     rep.file, rep.encoding, rep.sep = file_name, encoding, sep
+    rep.source_columns = source_columns
+    rep.notes = notes + [n for c in cols for n in c.notes]
     rep.hierarchy = level is not None
     rep.n_rows = len(df)
     if rep.n_rows > EXCEL_MAX_ROWS - 20:
@@ -571,6 +680,12 @@ def prepare(path, file_name, fc, period):
         if name is None:
             raise ValueError("иерархический отчёт без колонки «Наименование»")
         name.role = "name"
+        # пустое наименование: уровень 0 — «Всего», иначе — значение самого глубокого заполненного разреза
+        dims = [c for c in cols if c.role == "dimension" and c is not name]
+        for i, v in enumerate(name.values):
+            if v in (None, ""):
+                filled = [c.values[i] for c in dims if c.values[i] not in (None, "")]
+                name.values[i] = "Всего" if level.values[i] == 0 else (filled[-1] if filled else None)
         keys = [c for c in cols if c.role in ("dimension", "subrow") and c is not name]
         name.label = rules_for(rules, name.name).get("label") or " / ".join(level_labels(level, keys, rules)) or name.name
         for c in keys:
@@ -708,6 +823,34 @@ class Styler:
     def __init__(self, style):
         self.s = style
         self._fonts, self._fills, self._align = {}, {}, {}
+        self._styles, self._borders = {}, {}
+
+    def stamp(self, cell, font, align, border, fill=None, fmt="General"):
+        """Стиль ячейки целиком из кэша: openpyxl не пересчитывает хеши шрифта/заливки/рамки на каждой ячейке
+        (на больших листах — в десятки раз быстрее)."""
+        key = (id(font), id(align), id(border), id(fill), fmt)
+        tpl = self._styles.get(key)
+        if tpl is None:
+            cell.font, cell.alignment, cell.border = font, align, border
+            if fill is not None:
+                cell.fill = fill
+            cell.number_format = fmt
+            self._styles[key] = copy.copy(cell._style)
+        else:
+            cell._style = copy.copy(tpl)
+
+    def border(self, left=False, right=False, bottom=False):
+        """Рамка ячейки данных: внутренние линии + внешняя рамка таблицы на краях (если в палитре есть)."""
+        key = (left, right, bottom)
+        if key not in self._borders:
+            if not P["outer_border"] or not (left or right or bottom):
+                self._borders[key] = DATA_BORDER
+            else:
+                outer = Side(style="medium", color=P["outer_border"])
+                b = DATA_BORDER
+                self._borders[key] = Border(left=outer if left else b.left, right=outer if right else b.right,
+                                            top=b.top, bottom=outer if bottom else b.bottom)
+        return self._borders[key]
 
     def font(self, size=None, bold=False, color=None, italic=False, underline=None, name=None):
         color = color or P["text"]
@@ -729,14 +872,22 @@ class Styler:
         return self._align[key]
 
     def head(self, ws, row, col, value=None, fill=None, color=None, size=None):
-        cell = ws.cell(row, col)
-        if value is not None:
-            cell.value = value
+        cell = put(ws, row, col, value) if value is not None else ws.cell(row, col)
         cell.font = self.font(size, True, color or P["head_text"])
         cell.fill = self.fill(fill or P["head_fill"])
         cell.alignment = self.align("center", wrap=True)
         cell.border = HEAD_BORDER
         return cell
+
+
+def put(ws, row, col, value):
+    """Значение в ячейку: текст, начинающийся с «=», остаётся текстом (не формулой) — CSV не исполняется в Excel."""
+    cell = ws.cell(row, col)
+    cell.value = value
+    if isinstance(value, str) and value.startswith("="):
+        cell.data_type = "s"
+        cell.quotePrefix = True
+    return cell
 
 
 def link(cell, sheet, st, size=11, text=None):
@@ -862,13 +1013,13 @@ def write_sheet(ws, rep, fc, cfg, st):
             continue
         for r in range(head1, head2 + 1):
             st.head(ws, r, ci, fill=fill, color=color, size=hsize)
-        ws.cell(head1, ci).value = c.label
+        put(ws, head1, ci, c.label)
         if two_level and c.role not in ("service", "subrow"):   # служебные — без объединения, скрываются по одной
             ws.merge_cells(start_row=head1, start_column=ci, end_row=head2, end_column=ci)
         elif two_level:
             ws.cell(head1, ci).value = "служебная"
             ws.cell(head1, ci).font = st.font(9, True, P["muted"])
-            ws.cell(head2, ci).value = c.label
+            put(ws, head2, ci, c.label)
         j += 1
     if numbers_row:
         for ci in range(1, ncols + 1):
@@ -901,9 +1052,28 @@ def write_sheet(ws, rep, fc, cfg, st):
     for c in cols:
         head_cell[id(c)] = ws.cell(head2 if (two_level and c.group) else head1, col_idx[id(c)])
 
+    # раскраска Δ / Δ% (заливкой) — заранее, чтобы стиль каждой ячейки записать один раз
+    mode = str(coloring.get("mode", "static")).lower()
+    targets = colored_columns(rep, coloring) if mode != "off" else []
+    blocks = color_blocks(rep, levels, is_leaf, is_sub, n)
+    color_at, n_colored = {}, 0
+    if mode != "conditional":
+        for c in targets:
+            per_row = color_at.setdefault(id(c), {})
+            for block in blocks:
+                for i, color in zip(block, static_colors([c.values[i] for i in block], c, coloring)):
+                    if color:
+                        per_row[i] = st.fill(color)
+                        n_colored += 1
+    align_center, align_left = st.align("center"), st.align("left")
+    first_ci, last_ci = 1, ncols
+    ws.sheet_format.defaultRowHeight = 18.75 * size / 14      # высота строк данных — по умолчанию листа
+    ws.sheet_format.customHeight = True
+
     for i in range(n):
         r = first_data + i
         lvl = levels[i]
+        last = i == n - 1
         if rep.hierarchy:
             fill = level_fill(lvl) if (not is_leaf[i] or lvl == 0) else None
             bold = lvl <= 1
@@ -913,33 +1083,27 @@ def write_sheet(ws, rep, fc, cfg, st):
         sub = is_sub[i]
         fill_obj = st.fill(fill) if fill else None
         if rep.row_numbers:
-            cell = ws.cell(r, 1, i + 1)
-            cell.font, cell.alignment, cell.border = no_font, st.align("center"), DATA_BORDER
+            st.stamp(ws.cell(r, 1, i + 1), no_font, align_center, st.border(left=True, bottom=last))
         for c in cols:
             ci = col_idx[id(c)]
             value = formula_text(c.formula, r, letter) if (c.formula and live) else c.values[i]
-            cell = ws.cell(r, ci, value)
-            cell.border = DATA_BORDER
+            cell = put(ws, r, ci, value) if not (c.formula and live) else ws.cell(r, ci, value)
             if c.role in ("service", "subrow"):
-                cell.font, cell.alignment = service_font, st.align("left")
+                font, align = service_font, align_left
             elif c.role == "name":
-                cell.font = sub_font if sub else st.font(None, bold)
-                cell.alignment = st.align("left", indent=min(lvl or 0, 15))
+                font, align = (sub_font if sub else st.font(None, bold)), st.align("left", indent=min(lvl or 0, 15))
             elif c.is_metric:
-                cell.font = sub_font if sub else st.font(None, bold)
-                cell.alignment = st.align("center")
+                font, align = (sub_font if sub else st.font(None, bold)), align_center
             else:
-                cell.font = st.font(None, bold)
-                cell.alignment = st.align("left" if c.kind == "text" else "center")
-            if c.fmt:
-                cell.number_format = c.fmt
+                font, align = st.font(None, bold), (align_left if c.kind == "text" else align_center)
+            fmt = c.fmt or "General"
             if c.cap and isinstance(c.values[i], (int, float)) and c.values[i] > pct_cap:
-                cell.number_format = FMT_PCT_CAP
-            if fill_obj is not None:
-                cell.fill = fill_obj
-            elif c is key_metric and not sub:     # ключевая колонка — акцент в строках-деталях
-                cell.fill = key_fill
-        ws.row_dimensions[r].height = 18.75 * size / 14
+                fmt = FMT_PCT_CAP
+            fill = fill_obj
+            if fill is None:
+                fill = color_at.get(id(c), {}).get(i) or (key_fill if (c is key_metric and not sub) else None)
+            border = st.border(left=ci == first_ci, right=ci == last_ci, bottom=last)
+            st.stamp(cell, font, align, border, fill, fmt)
 
     # --- строка «Итого» под шапкой (SUBTOTAL 109 — только видимые после фильтра строки)
     if total_row:
@@ -982,12 +1146,7 @@ def write_sheet(ws, rep, fc, cfg, st):
             cell.fill, cell.font, cell.border = st.fill(P["total"]), st.font(10, True), DATA_BORDER
         ws.row_dimensions[total_row].height = 18.75 * size / 14
 
-    # --- раскраска Δ / Δ%
-    n_colored = 0
-    mode = str(coloring.get("mode", "static")).lower()
-    targets = colored_columns(rep, coloring) if mode != "off" else []
-    blocks = color_blocks(rep, levels, is_leaf, is_sub, n)
-    # формулы колонок: добавленные Δ / Δ% и подсказки для Δ из CSV
+    # --- формулы колонок: добавленные Δ / Δ% и подсказки для Δ из CSV
     for c in cols:
         spec = c.formula or c.hint
         if spec and n:
@@ -1017,13 +1176,6 @@ def write_sheet(ws, rep, fc, cfg, st):
                         start_type="min", start_color=fall, mid_type="num", mid_value=0, mid_color=CF_WHITE,
                         end_type="max", end_color=grow))
                     n_colored += b - a + 1
-        else:
-            for block in blocks:
-                fills = static_colors([c.values[i] for i in block], c, coloring)
-                for i, color in zip(block, fills):
-                    if color:
-                        ws.cell(first_data + i, ci).fill = st.fill(color)
-                        n_colored += 1
 
     rep.tech = tech
     if cfg["book"].get("header_notes", True):
@@ -1038,7 +1190,7 @@ def write_sheet(ws, rep, fc, cfg, st):
 
     # --- внешняя рамка таблицы (палитра B: внешняя #9AA5B1, внутренние #D3D9DF)
     if P["outer_border"] and n:
-        frame(ws, head1, last_data, 1, ncols, P["outer_border"])
+        frame(ws, head1, first_data - 1, 1, ncols, P["outer_border"], bottom_edge=False)
 
     # --- ширины
     widths = {}
@@ -1110,7 +1262,7 @@ def write_sheet(ws, rep, fc, cfg, st):
     return n_colored, len(blocks)
 
 
-def frame(ws, top, bottom, left, right, color):
+def frame(ws, top, bottom, left, right, color, bottom_edge=True):
     side = Side(style="medium", color=color)
     for r in range(top, bottom + 1):
         for ci in (left, right):
@@ -1119,11 +1271,11 @@ def frame(ws, top, bottom, left, right, color):
             cell.border = Border(left=side if ci == left else b.left, right=side if ci == right else b.right,
                                  top=b.top, bottom=b.bottom)
     for ci in range(left, right + 1):
-        for r in (top, bottom):
+        for r in (top, bottom) if bottom_edge else (top,):
             cell = ws.cell(r, ci)
             b = cell.border
             cell.border = Border(left=b.left, right=b.right, top=side if r == top else b.top,
-                                 bottom=side if r == bottom else b.bottom)
+                                 bottom=side if (r == bottom and bottom_edge) else b.bottom)
 
 
 def shown(v, c):
@@ -1307,9 +1459,24 @@ def build(src_dir, cfg, out_path, explain=False):
             print(f"     {roles}")
             continue
         name = sheet_title(fc.get("sheet") or (f"{no} {rest}" if no else rest), used)
+        cells = rep.n_rows * len(rep.columns)
+        if cells > BIG_SHEET_CELLS:   # замер: 200 тыс. строк × 18 колонок ≈ 1,5 мин и ≈ 1,8 ГБ памяти
+            print(f"   [!] {f}: большой лист ({rep.n_rows:,} строк × {len(rep.columns)} колонок) — сборка займёт "
+                  f"~{max(1, round(cells / 2_500_000 * 1.5))} мин и ~{cells / 2_000_000:.1f} ГБ памяти; "
+                  "для отчёта лучше агрегировать данные".replace(",", " "))
         ws = wb.create_sheet(name)
-        n_colored, n_blocks = write_sheet(ws, rep, fc, cfg, st)
+        try:
+            n_colored, n_blocks = write_sheet(ws, rep, fc, cfg, st)
+        except Exception as err:   # сбой записи листа — лист убираем, остальные файлы собираем
+            wb.remove(ws)
+            used.discard(name.lower())
+            reason = f"ошибка при записи листа: {type(err).__name__}: {err}"
+            print(f"[пропуск] {f}: {reason}")
+            skipped.append((f, reason))
+            continue
         print(f"[ok] {name:31} строк={rep.n_rows:7}  метрик={len(rep.metrics):3}  окрашено={n_colored:7}  <- {f}")
+        for note in rep.notes:
+            print(f"     ! {note}")
         entries.append((name, rep))
         for c in rep.columns:
             h = help_rows.setdefault(c.name, {"label": c.label, "role": c.role, "kind": c.kind, "fmt": c.fmt,
@@ -1355,7 +1522,7 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
         ws.cell(row, 1, note).font = st.font(11, False, P["muted"])
         row += 1
     row += 1
-    heads = ["№", "Лист", "Описание", "Структура", "Метрики", "Строк", "Ключевой итог", "Значение", "Файл"]
+    heads = ["№", "Лист", "Описание", "Структура", "Метрики", "Строк", "Ключевой итог", "Значение", "Файл", "Замечания"]
     for ci, h in enumerate(heads, start=1):
         st.head(ws, row, ci, h, size=11)
     head_row = row
@@ -1363,8 +1530,8 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
         row += 1
         ws.cell(row, 1, k)
         link(ws.cell(row, 2), name, st, 11, name)
-        ws.cell(row, 3, rep.description)
-        ws.cell(row, 4, structure_text(rep))
+        put(ws, row, 3, rep.description)
+        put(ws, row, 4, structure_text(rep))
         names = [c.name for c in rep.metrics if not c.formula]
         text = ", ".join(names)
         ws.cell(row, 5, (text if len(text) <= 120 else text[:117].rsplit(",", 1)[0] + f" … всего {len(names)}") or "—")
@@ -1373,13 +1540,16 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
         ws.cell(row, 7, metric.name if metric else None)
         if value is not None:
             ws.cell(row, 8, value).number_format = metric.fmt or FMT["money"]
-        ws.cell(row, 9, rep.file)
+        put(ws, row, 9, rep.file)
+        put(ws, row, 10, "; ".join(rep.notes) or None)
         for ci in range(1, len(heads) + 1):
             cell = ws.cell(row, ci)
             cell.border = DATA_BORDER
             if ci != 2:
                 cell.font = st.font(11)
-            cell.alignment = st.align("center" if ci in (1, 6, 8) else "left", wrap=ci in (3, 4, 5))
+            cell.alignment = st.align("center" if ci in (1, 6, 8) else "left", wrap=ci in (3, 4, 5, 10))
+            if ci == 10 and cell.value:
+                cell.font = st.font(11, False, P["alert"])
     if skipped:
         row += 2
         ws.cell(row, 1, "Пропущенные файлы").font = st.font(11, True, P["alert"])
@@ -1387,7 +1557,7 @@ def write_toc(ws, entries, skipped, cfg, src_dir, st):
             row += 1
             ws.cell(row, 2, f).font = st.font(11)
             ws.cell(row, 3, reason).font = st.font(11, False, P["muted"])
-    for col, width in zip("ABCDEFGHI", (5, 32, 60, 45, 45, 9, 24, 16, 40)):
+    for col, width in zip("ABCDEFGHIJ", (5, 32, 60, 45, 45, 9, 24, 16, 40, 50)):
         ws.column_dimensions[col].width = width
     ws.freeze_panes = ws.cell(head_row + 1, 1)
     print_setup(ws, cfg["style"], f"{head_row}:{head_row}")
@@ -1426,7 +1596,7 @@ def write_formulas(ws, entries, st, style):
         for c, cells, text, note in rep.tech:
             r += 1
             link(ws.cell(r, 1), name, st, 11, name)
-            ws.cell(r, 2, c.name)
+            put(ws, r, 2, c.name)
             ws.cell(r, 3, cells)
             cell = ws.cell(r, 4, text)
             cell.data_type, cell.quotePrefix = "s", True     # текст «=…», Excel его не вычисляет
@@ -1458,7 +1628,7 @@ def write_help(ws, rows, st, style):
         r += 1
         values = [name, h["label"], roles.get(h["role"], h["role"]), h["kind"], h["description"], ", ".join(h["sheets"])]
         for ci, v in enumerate(values, start=1):
-            cell = ws.cell(r, ci, v)
+            cell = put(ws, r, ci, v)
             cell.font, cell.border = st.font(11), DATA_BORDER
             cell.alignment = st.align("left", wrap=ci in (5, 6))
     for col, width in zip("ABCDEF", (34, 30, 18, 12, 50, 60)):
@@ -1470,15 +1640,6 @@ def write_help(ws, rows, st, style):
 
 # ---------------------------------------------------------------- уточняющие вопросы
 TECH_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+$|^[A-Z][A-Z0-9]{2,}$")
-KIND_CHOICES = [
-    ("count", "штуки (случаи, пациенты, количество) — голубая шапка"),
-    ("money", "деньги — зелёная шапка"),
-    ("number", "другое число (коэффициент, средний чек, баллы) — бирюзовая шапка"),
-    ("pct", "процент / доля — бирюзовая шапка"),
-    ("dimension", "не метрика: код, номер, разрез — не суммируется и не красится"),
-]
-
-
 class Asker:
     """Вопрос в консоли: Enter — вариант в скобках, «!» — принять все остальные варианты по умолчанию."""
 
@@ -1528,70 +1689,112 @@ def load_raw(path):
         return yaml.safe_load(f) or {}
 
 
+KIND_CHOICES = [
+    ("count", "штуки (случаи, пациенты, количество) — голубая шапка, суммируется"),
+    ("money", "деньги — зелёная шапка, суммируется"),
+    ("number", "другое число (балл, коэффициент, среднее) — бирюзовая, не суммируется"),
+    ("pct", "процент / доля — бирюзовая, не суммируется"),
+    ("delta", "Δ — изменение (разница), подсвечивается"),
+    ("delta_pct", "Δ% — изменение в процентах, подсвечивается"),
+    ("dimension", "разрез / код / текст — не метрика"),
+    ("skip", "не выводить в отчёт"),
+]
+KIND_RU = {"count": "штуки", "money": "деньги", "number": "другое число", "pct": "процент", "pct_points": "процент",
+           "delta": "Δ", "delta_pct": "Δ%", "date": "дата", "datetime": "дата и время", "text": "текст"}
+ROLE_RU = {"level": "уровень иерархии", "name": "наименование", "subrow": "«из них»", "service": "служебная",
+           "dimension": "разрез"}
+
+
+def describe(c):
+    if c.is_metric:
+        return KIND_RU.get(c.kind, c.kind)
+    if c.role == "dimension" and c.kind in ("date", "datetime"):
+        return KIND_RU[c.kind]
+    return ROLE_RU.get(c.role, c.role)
+
+
+def parse_numbers(text, upper):
+    """«2,5 7-9» -> [2, 5, 7, 8, 9]; номера вне 1..upper — ошибка."""
+    out = []
+    for part in re.split(r"[,\s;]+", text.strip()):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+        nums = list(range(int(m.group(1)), int(m.group(2)) + 1)) if m else ([int(part)] if part.isdigit() else None)
+        if nums is None or any(not 1 <= x <= upper for x in nums):
+            raise ValueError(part)
+        out += [x for x in nums if x not in out]
+    return out
+
+
+def ask_numbers(asker, question, upper, default_text):
+    while True:
+        answer = asker._read(f"{question} [{default_text}]: ")
+        if not answer:
+            return None
+        if answer.strip() == "0":
+            return []
+        try:
+            return parse_numbers(answer, upper)
+        except ValueError as err:
+            asker.out(f"   не понял «{err}»: номера от 1 до {upper} через запятую или диапазон 2-5; 0 — ничего")
+
+
+def structure_key(rep):
+    return (rep.hierarchy, tuple(c.name for c in rep.source_columns))
+
+
 def plan_questions(src_dir, cfg, raw, force=False):
-    """Что спросить: только то, чего нет в конфиге и в чём скрипт не уверен.
-    force (--ask) — спросить всё заново; прежние ответы станут вариантами по умолчанию."""
-    book_raw = {} if force else (raw.get("book") or {})
-    files_raw = {} if force else (raw.get("files") or {})
-    rules_raw = {} if force else (raw.get("columns") or {})
+    """Анализ папки: файлы -> структуры (одинаковый набор колонок). Спрашивается только о структурах, у которых
+    есть файлы без настроек в конфиге (force / --ask — обо всех), и о параметрах книги, которых нет в конфиге."""
     if force:            # распознать колонки заново, без сохранённых ответов про вид
         cfg = dict(cfg, columns={k: {kk: vv for kk, vv in (v or {}).items() if kk not in ("kind", "role")}
                                  for k, v in (cfg.get("columns") or {}).items()})
+    files_raw = {} if force else (raw.get("files") or {})
     reports, broken = [], []
     for f, fc in discover(src_dir, cfg):
         try:
             reports.append((f, prepare(os.path.join(src_dir, f), f, fc, cfg["book"].get("period") or "")))
         except Exception as err:   # о битых файлах только сообщаем
             broken.append((f, str(err)))
-    plan = {"reports": reports, "broken": broken, "book": [], "kinds": [], "labels": [], "files": []}
+    structures = {}
+    for f, r in reports:
+        structures.setdefault(structure_key(r), []).append((f, r))
+    book_raw = {} if force else (raw.get("book") or {})
     has_years = any(c.year for _, r in reports for c in r.metrics)
     has_delta = any(c.kind in ("delta", "delta_pct") for _, r in reports for c in r.metrics)
-    for key in ("title", "subtitle") + (("period",) if has_years else ()) :
-        if key not in book_raw:
-            plan["book"].append(key)
+    book = [k for k in ("title", "subtitle") + (("period",) if has_years else ()) if k not in book_raw]
     if (has_delta or has_years) and (force or "positive_is" not in (raw.get("coloring") or {})):
-        plan["book"].append("positive_is")
-    seen = set()
-    for _, r in reports:
-        for c in r.columns:
-            if c.formula or c.name in seen or rules_for(rules_raw, c.name):
-                continue
-            seen.add(c.name)
-            if c.is_metric and c.kind_source == "values":
-                plan["kinds"].append(c)
-            if TECH_NAME.match(c.name):
-                plan["labels"].append(c)
-    for f, r in reports:
-        if not any(pattern_match(p, f) or pattern_match(p, os.path.splitext(f)[0]) for p in files_raw):
-            plan["files"].append((f, r))
-    plan["count"] = len(plan["book"]) + len(plan["kinds"]) + len(plan["labels"]) + 2 * len(plan["files"])
-    return plan
+        book.append("positive_is")
+
+    def known(f):
+        return any(pattern_match(p, f) or pattern_match(p, os.path.splitext(f)[0]) for p in files_raw)
+    todo = [items for items in structures.values() if not all(known(f) for f, _ in items)]
+    return {"reports": reports, "broken": broken, "structures": list(structures.values()), "todo": todo,
+            "book": book, "count": len(book) + len(todo)}
 
 
 def interview(src_dir, cfg, raw, asker, force=False):
-    """Задаёт вопросы по плану и возвращает конфиг с ответами (для записи в report.yaml)."""
+    """Вопросы аналитику. Возвращает (конфиг с ответами, были ли вопросы)."""
     plan = plan_questions(src_dir, cfg, raw, force)
     out = asker.out
     raw = copy.deepcopy(raw)
-    out(f"\nПапка: {src_dir}")
-    for f, r in plan["reports"]:
-        kinds = {}
-        for c in r.metrics:
-            if not c.formula:
-                kinds[c.kind] = kinds.get(c.kind, 0) + 1
-        what = ", ".join(f"{KIND_RU.get(k, k)} {v}" for k, v in kinds.items()) or "метрик нет"
-        out(f"  • {f}: {'иерархия' if r.hierarchy else 'таблица'}, строк {r.n_rows}; {what}")
+    n_files = len(plan["reports"])
+    out(f"\nПапка: {src_dir}\nCSV: {n_files + len(plan['broken'])}, прочитано {n_files}, "
+        f"структур (одинаковый набор колонок): {len(plan['structures'])}")
     for f, err in plan["broken"]:
         out(f"  • {f}: не прочитан — {err}")
     if not plan["count"]:
-        out("Уточнять нечего — всё есть в конфиге.")
+        out("Уточнять нечего — всё есть в конфиге (спросить заново: --ask).")
         return raw, False
-    out(f"\nНужно уточнить {plan['count']} пунктов. Enter — оставить вариант в скобках, «!» — принять все остальные.")
+    out("Enter — оставить вариант в скобках, «!» — принять все остальные варианты.\n")
 
     book = raw.setdefault("book", {})
     folder = os.path.basename(src_dir.rstrip("\\/"))
+    if plan["book"]:
+        out("— Отчёт целиком —")
     if "title" in plan["book"]:
-        book["title"] = asker.text("\nЗаголовок отчёта (вверху каждого листа)", book.get("title") or folder)
+        book["title"] = asker.text("Заголовок отчёта (вверху каждого листа)", book.get("title") or folder)
     if "subtitle" in plan["book"]:
         book["subtitle"] = asker.text("Подзаголовок — отбор / источник (например «ЗЛ, ДЗМ, взрослые»)",
                                       book.get("subtitle") or "")
@@ -1599,48 +1802,132 @@ def interview(src_dir, cfg, raw, asker, force=False):
         book["period"] = asker.text("Период к годам в шапке (например «9м» -> «2026 9м»)", book.get("period") or "")
     if "positive_is" in plan["book"]:
         raw.setdefault("coloring", {})["positive_is"] = asker.choice(
-            "\nРост показателей в этих отчётах — это:",
+            "Рост показателей в этих отчётах — это:",
             [("bad", "плохо — рост красный, снижение зелёное (затраты, объёмы оплаты)"),
              ("good", "хорошо — рост зелёный, снижение красное (выручка, выполнение плана)")],
             (raw.get("coloring") or {}).get("positive_is", "bad"))
 
     columns = raw.setdefault("columns", {})
-    if plan["kinds"]:
-        out("\nКолонки, вид которых понятен только по цифрам (от вида зависят цвет шапки, формат и итоги):")
-    for c in plan["kinds"]:
-        before = rules_for(raw.get("columns") or {}, c.name)
-        default = ("dimension" if before.get("role") == "dimension" else before.get("kind")) \
-            or ("dimension" if c.maybe_code else c.kind)
-        default = default if default in dict(KIND_CHOICES) else c.kind
-        note = " — все значения разные, похоже на код" if c.maybe_code else ""
-        kind = asker.choice(f"\n«{c.name}», например: {', '.join(map(str, c.sample))}{note}", KIND_CHOICES, default)
-        rule = columns.setdefault(c.name, {})
-        rule.pop("role" if kind != "dimension" else "kind", None)
-        rule.update({"role": "dimension"} if kind == "dimension" else {"kind": kind, "role": "metric"})
-    if plan["labels"]:
-        out("\nТехнические имена колонок — как подписать в шапке (Enter — оставить как есть):")
-    for c in plan["labels"]:
-        label = asker.text(f"  {c.name} (например: {', '.join(map(str, c.sample))})",
-                           rules_for(raw.get("columns") or {}, c.name).get("label") or c.name)
-        columns.setdefault(c.name, {})["label"] = label
-
     files = raw.setdefault("files", {})
-    if plan["files"]:
-        out("\nЛисты (имя листа — до 31 символа):")
-    for f, r in plan["files"]:
-        stem = os.path.splitext(f)[0]
-        no, rest = report_number(stem)
-        before = files.get(f) or {}
-        sheet = asker.text(f"  {f}: имя листа", before.get("sheet") or (f"{no} {rest}" if no else rest)[:31])
-        description = asker.text("     описание под заголовком (Enter — пропустить)", before.get("description") or "")
-        files[f] = dict(before, sheet=sheet[:31])
-        if description:
-            files[f]["description"] = description
+    for k, items in enumerate(plan["todo"], start=1):
+        ask_structure(asker, k, len(plan["todo"]), items, columns, files)
+    todo = {f for items in plan["todo"] for f, _ in items}
+    ask_sheet_names(asker, [(f, r) for f, r in plan["reports"] if f in todo], files)
     return raw, True
 
 
-KIND_RU = {"count": "штуки", "money": "деньги", "number": "числа", "pct": "проценты", "pct_points": "проценты",
-           "delta": "Δ", "delta_pct": "Δ%"}
+def ask_structure(asker, k, total, items, columns, files):
+    out = asker.out
+    f0, rep = items[0]
+    names = [f for f, _ in items]
+    shown_files = ", ".join(names[:4]) + (f" и ещё {len(names) - 4}" if len(names) > 4 else "")
+    out(f"\n— Структура {k} из {total}: {len(items)} файл(ов) — {shown_files}")
+    out(f"  {'иерархия (колонка «Уровень»)' if rep.hierarchy else 'плоская таблица'}, строк в первом файле: {rep.n_rows}")
+    cols = rep.columns
+    for i, c in enumerate(cols, start=1):
+        flags = []
+        if c.formula:
+            flags.append("добавлена скриптом")
+        if c.kind_source == "values":
+            flags.append("вид угадан по цифрам — проверьте")
+        if c.maybe_code:
+            flags.append("все значения разные — похоже на код")
+        if not c.is_metric and 0.5 <= c.numeric_share < 0.98:
+            flags.append(f"{c.numeric_share:.0%} чисел, есть текст: «{c.odd_value}» — может, метрика?")
+        sample = ", ".join(map(str, c.sample[:2]))
+        shown = c.name if c.label in (c.name, c.base) or c.formula else f"{c.name} -> «{c.label}»"
+        out(f"  {i:>3}. {shown[:38]:<38} {describe(c):<16} {sample[:26]:<26} {'; '.join(flags)}")
+
+    # 1. вид колонок
+    editable = [c for c in cols if not c.formula and c.role not in ("level", "name", "subrow")]
+    chosen = ask_numbers(asker, "Изменить вид колонок? Номера через запятую (2,5 или 3-6), Enter — всё верно",
+                         len(cols), "всё верно")
+    for i in chosen or []:
+        c = cols[i - 1]
+        if c not in editable:
+            out(f"   «{c.label}»: {'добавлена скриптом — меняется через исходные колонки' if c.formula else 'служебная роль, не меняется'}")
+            continue
+        current = "dimension" if not c.is_metric else ("pct" if c.kind == "pct_points" else c.kind)
+        siblings = [x for x in editable if x is c or (c.year and x.year and x.base == c.base)]
+        also = [x.name for x in siblings if x is not c]
+        kind = asker.choice(f"«{c.name}» (например: {', '.join(map(str, c.sample))})"
+                            + (f" — то же для: {', '.join(also)}" if also else "") + ":", KIND_CHOICES, current)
+        for x in siblings:          # «Сумма 2026» и «Сумма 2025» — одного вида
+            rule = columns.setdefault(x.name, {})
+            for key in ("kind", "role"):
+                rule.pop(key, None)
+            if kind in ("dimension", "skip"):
+                rule["role"] = kind
+            else:
+                rule.update({"role": "metric", "kind": kind})
+
+    # 2. подсветка
+    per_file = {}
+    metric_idx = [i for i, c in enumerate(cols, start=1) if c.is_metric]
+    default_hl = [i for i, c in enumerate(cols, start=1) if c.is_metric and c.kind in ("delta", "delta_pct")]
+    if metric_idx:
+        default_text = ("Δ и Δ%: " + ",".join(map(str, default_hl))) if default_hl else "ничего"
+        hl = ask_numbers(asker, "Что подсвечивать шкалой «рост / снижение»? Номера, 0 — ничего", len(cols), default_text)
+        if hl is not None and hl != default_hl:
+            if hl:
+                per_file["coloring"] = {"columns": [cols[i - 1].name for i in hl]}
+            else:
+                per_file["coloring"] = {"mode": "off"}
+
+        # 3. главная метрика
+        main, _ = main_metric(rep.metrics, rep.table)
+        if main is not None:
+            default_i = cols.index(main) + 1
+            what = "сортировка детей внутри групп и выделенная колонка" if rep.hierarchy else "выделенная колонка"
+            while True:
+                ans = asker._read(f"Главная метрика ({what}) — номер [{default_i}. {main.name}]: ")
+                if not ans:
+                    break
+                if ans.isdigit() and int(ans) in metric_idx:
+                    if int(ans) != default_i:
+                        per_file.setdefault("table", {})["sort"] = "-" + cols[int(ans) - 1].name
+                    break
+                out(f"   нужен номер метрики: {', '.join(map(str, metric_idx))}")
+
+        # 4. строка «Итого»
+        if not rep.hierarchy and any(c.additive for c in rep.metrics):
+            totals = asker.choice("Строка «Итого» под шапкой:", [("on", "да"), ("off", "нет")], "on")
+            if totals == "off":
+                per_file.setdefault("table", {})["totals"] = "off"
+
+    # 5. подписи технических имён
+    tech = [c for c in cols if TECH_NAME.match(c.name) and not rules_for(columns, c.name).get("label")]
+    if tech:
+        out("Подписи для технических имён (Enter — оставить как есть):")
+    for c in tech:
+        columns.setdefault(c.name, {})["label"] = asker.text(
+            f"  {c.name} (например: {', '.join(map(str, c.sample[:3]))})", c.name)
+    for f, _ in items:
+        files[f] = deep_merge(files.get(f) or {}, per_file)
+
+
+def ask_sheet_names(asker, items, files):
+    if not items:
+        return
+    out = asker.out
+    proposed = {}
+    used = set()
+    for f, _ in items:
+        no, rest = report_number(os.path.splitext(f)[0])
+        proposed[f] = sheet_title((files.get(f) or {}).get("sheet") or (f"{no} {rest}" if no else rest), used)
+    out("\n— Имена листов —")
+    for f, name in proposed.items():
+        out(f"  {name:<31}  <- {f}")
+    how = asker.choice("Имена листов:", [("auto", "как в списке"), ("manual", "задать каждому (и описание)")], "auto")
+    for f, _ in items:
+        entry = files.setdefault(f, {})
+        if how == "manual":
+            entry["sheet"] = asker.text(f"  {f}: имя листа (до 31 символа)", proposed[f])[:31]
+            description = asker.text("     описание под заголовком (Enter — пропустить)", entry.get("description") or "")
+            if description:
+                entry["description"] = description
+        else:
+            entry["sheet"] = proposed[f]
 
 
 def save_answers(raw, path):
