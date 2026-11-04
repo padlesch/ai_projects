@@ -106,6 +106,7 @@ DEFAULTS = {
         "totals": "auto",              # плоские таблицы: auto/on — строка «Итого» под шапкой; off — нет
         "autofilter": True,            # плоские таблицы
         "sort": None,                  # «-Сумма 2026» — по убыванию; «Наименование» — по возрастанию
+        "key": None,                   # главная метрика: выделенная колонка, сортировка детей в иерархии
         "hierarchy_sort": "auto",      # иерархия: auto — дети по убыванию главной метрики; off — порядок CSV
         "row_numbers": "auto",         # колонка «№»: auto — только в иерархических отчётах
         "column_numbers": True,        # строка с номерами колонок под шапкой
@@ -763,7 +764,9 @@ def level_labels(level, keys, rules):
 
 
 def main_metric(cols, table):
-    sort = table.get("sort")
+    """Главная метрика: table.key (выделенная колонка и сортировка детей в иерархии; порядок строк плоской
+    таблицы не меняет), иначе table.sort, иначе — деньги (или первая метрика) самого свежего года."""
+    sort = table.get("key") or table.get("sort")
     if sort:
         name = sort.lstrip("-+")
         found = next((c for c in cols if c.name.lower() == name.lower()), None)
@@ -787,28 +790,50 @@ def subrow_flags(cols, n):
 
 
 def hierarchy_order(cols, level, table):
-    """Структура — как в CSV: родитель строки — ближайшая строка выше с меньшим уровнем; подстроки «из них»
-    прикреплены к строке над ними и ездят вместе с ней. Сортируются только дети внутри каждой группы
-    (по главной метрике, при равенстве — по той же метрике прошлого года, затем порядок CSV)."""
+    """Порядок строк иерархического отчёта. Порядок строк в CSV не важен (выгрузка часто идёт по уровням:
+    сначала все группы 1-го уровня, потом все 2-го…):
+      • родитель строки уровня N — строка уровня N−1 с теми же значениями разрезов; разрез относится к уровню,
+        на котором он впервые заполнен (MO_NAME — уровень 1, GROUP_NAME — уровень 2 …);
+      • подстрока «из них …» — сразу под строкой с теми же разрезами того же уровня или уровнем выше
+        (ЖК -> «из них операции»);
+      • если по разрезам родителя не найти — ближайшая строка выше с меньшим уровнем (как в CSV).
+    Дети каждой группы — по главной метрике по убыванию (при равенстве — та же метрика прошлого года, затем
+    порядок CSV); hierarchy_sort: off — дети в порядке CSV, но под своими родителями."""
     n = len(level.values)
-    if str(table.get("hierarchy_sort", "auto")).lower() == "off":
-        return list(range(n))
+    do_sort = str(table.get("hierarchy_sort", "auto")).lower() != "off"
     metric, ascending = main_metric(cols, table)
     second = None
     if metric is not None and metric.year:
         second = next((c for c in cols if c.is_metric and c.base == metric.base and c.year and c.year < metric.year), None)
     is_sub = subrow_flags(cols, n)
+    keys = [c for c in cols if c.role == "dimension"]
+    col_level = {}
+    for c in keys:
+        lv = [l for l, v, sub in zip(level.values, c.values, is_sub) if v not in (None, "") and not sub]
+        col_level[id(c)] = min(lv) if lv else 10 ** 6
 
+    def path(i, lvl):
+        return tuple("" if c.values[i] is None else str(c.values[i]) for c in keys if col_level[id(c)] <= lvl)
+
+    nodes = [{"i": i, "level": level.values[i], "children": [], "subs": []} for i in range(n)]
+    by_path = {}
+    for node in nodes:
+        if not is_sub[node["i"]]:
+            by_path.setdefault((node["level"], path(node["i"], node["level"])), node)
     root = {"i": None, "level": -1, "children": [], "subs": []}
-    stack, last = [root], root
-    for i in range(n):
-        if is_sub[i]:
-            last["subs"].append(i)
+    stack, last = [root], root            # запасной путь — по порядку строк CSV
+    for node in nodes:
+        i, lvl = node["i"], node["level"]
+        if is_sub[i]:   # владелец — строка того же уровня с теми же разрезами, иначе уровнем выше (оба формата)
+            owner = (by_path.get((lvl, path(i, lvl))) or by_path.get((lvl - 1, path(i, lvl - 1)))) if keys else None
+            (owner or last)["subs"].append(i)
             continue
-        node = {"i": i, "level": level.values[i], "children": [], "subs": []}
-        while len(stack) > 1 and stack[-1]["level"] >= node["level"]:
+        while len(stack) > 1 and stack[-1]["level"] >= lvl:
             stack.pop()
-        stack[-1]["children"].append(node)
+        parent = root if lvl <= 0 else (by_path.get((lvl - 1, path(i, lvl - 1))) if keys else None)
+        if parent is None or parent is node:
+            parent = stack[-1]
+        parent["children"].append(node)
         stack.append(node)
         last = node
 
@@ -820,7 +845,7 @@ def hierarchy_order(cols, level, table):
 
     def key(node):
         i = node["i"]
-        return (sign * val(metric, i), sign * val(second, i), i)
+        return (sign * val(metric, i), sign * val(second, i), i) if do_sort else (i,)
 
     out = list(root["subs"])
 
@@ -1406,6 +1431,17 @@ def report_number(stem):
     return "", humanize(stem)
 
 
+def default_sheet_name(file_name, folder_files):
+    """Имя листа по умолчанию: «номер + имя файла»; если имя без номера одинаковое у всех файлов папки
+    с номером (rep_app_stac_1_…, rep_app_stac_1_1_…) — оно ничего не различает: «Отчёт 1.1»."""
+    no, rest = report_number(os.path.splitext(file_name)[0])
+    if not no:
+        return rest
+    numbered = [report_number(os.path.splitext(f)[0]) for f in folder_files]
+    rests = {r for n, r in numbered if n}            # сравниваются только файлы с номером отчёта
+    return f"Отчёт {no}" if sum(1 for n, _ in numbered if n) > 1 and rests == {rest} else f"{no} {rest}"
+
+
 def sheet_title(name, used):
     base = re.sub(r"[\[\]:*?/\\]", " ", str(name)).strip().strip("'")[:31] or "Отчёт"
     title, k = base, 2
@@ -1468,6 +1504,7 @@ def build(src_dir, cfg, out_path, explain=False):
     files = discover(src_dir, cfg)
     if not files:
         sys.exit(f"В папке {src_dir} нет CSV-файлов")
+    all_files = [f for f, _ in files]
     period = book.get("period") or ""
     wb = Workbook()
     toc = wb.active
@@ -1495,7 +1532,7 @@ def build(src_dir, cfg, out_path, explain=False):
             print(f"[{'иерархия' if rep.hierarchy else 'таблица '}] {f}  ({rep.encoding}, разделитель {sep_name(rep.sep)}, строк {rep.n_rows})")
             print(f"     {roles}")
             continue
-        name = sheet_title(fc.get("sheet") or (f"{no} {rest}" if no else rest), used)
+        name = sheet_title(fc.get("sheet") or default_sheet_name(f, all_files), used)
         cells = rep.n_rows * len(rep.columns)
         if cells > BIG_SHEET_CELLS:   # замер: 200 тыс. строк × 18 колонок ≈ 1,5 мин и ≈ 1,8 ГБ памяти
             print(f"   [!] {f}: большой лист ({rep.n_rows:,} строк × {len(rep.columns)} колонок) — сборка займёт "
@@ -1868,6 +1905,16 @@ def interview(src_dir, cfg, raw, asker, force=False):
     columns = raw.setdefault("columns", {})
     files = raw.setdefault("files", {})
     todo = plan["todo"]
+    # вопрос 5 (последний): колонки — автоматически или проверить в консоли; подробно — в веб-приложении
+    if todo:
+        n_doubt = sum(1 for items in todo if any(doubts(items[0][1], columns)))
+        how = asker.choice(
+            f"Колонки и листы ({len(todo)} тип(ов) отчётов, с сомнениями: {n_doubt}):",
+            [("auto", "распознать автоматически (подробная настройка — веб-приложение report_app.py)"),
+             ("review", "проверить здесь, в консоли")], "auto")
+        if how == "auto":
+            auto_sheet_names([it for items in todo for it in items], files)
+            return raw, True
     if len(todo) > 1:
         out(f"\n— Структуры файлов: {len(todo)} —")
         for k, items in enumerate(todo, start=1):
@@ -1979,7 +2026,7 @@ def ask_structure(asker, k, total, items, columns, files):
                     break
                 if ans.isdigit() and int(ans) in metric_idx:
                     if int(ans) != default_i:
-                        per_file.setdefault("table", {})["sort"] = "-" + cols[int(ans) - 1].name
+                        per_file.setdefault("table", {})["key"] = cols[int(ans) - 1].name
                     break
                 out(f"   нужен номер метрики: {', '.join(map(str, metric_idx))}")
 
@@ -2011,6 +2058,15 @@ def set_kind(columns, cols, kind):
             rule.update({"role": "metric", "kind": kind})
 
 
+def auto_sheet_names(items, files):
+    """Имена листов без вопросов: из номера отчёта и имени файла (до 31 символа, без повторов)."""
+    used = {(e or {}).get("sheet", "").lower() for f, e in files.items() if f not in dict(items)}
+    for f, _ in items:
+        no, rest = report_number(os.path.splitext(f)[0])
+        entry = files.setdefault(f, {})
+        entry["sheet"] = sheet_title(entry.get("sheet") or default_sheet_name(f, [x for x, _ in items]), used)
+
+
 def ask_sheet_names(asker, items, files):
     if not items:
         return
@@ -2019,7 +2075,8 @@ def ask_sheet_names(asker, items, files):
     used = set()
     for f, _ in items:
         no, rest = report_number(os.path.splitext(f)[0])
-        proposed[f] = sheet_title((files.get(f) or {}).get("sheet") or (f"{no} {rest}" if no else rest), used)
+        proposed[f] = sheet_title((files.get(f) or {}).get("sheet") or default_sheet_name(f, [x for x, _ in items]),
+                                  used)
     out("\n— Имена листов —")
     for f, name in proposed.items():
         out(f"  {name:<31}  <- {f}")
@@ -2035,6 +2092,13 @@ def ask_sheet_names(asker, items, files):
             entry["sheet"] = proposed[f]
 
 
+if yaml is not None:
+    class _PlainDumper(yaml.SafeDumper):
+        """Без ссылок &id001 / *id001: одинаковые списки у разных файлов пишутся полностью — удобно править руками."""
+        def ignore_aliases(self, data):
+            return True
+
+
 def save_answers(raw, path):
     """Записывает конфиг с ответами; прежний файл — в .bak (комментарии в нём сохраняются)."""
     if os.path.exists(path):
@@ -2048,7 +2112,7 @@ def save_answers(raw, path):
         with open(path, "w", encoding="utf-8") as f:
             f.write("# Настройки отчёта: ответы на вопросы report_builder.py. Править можно вручную;\n"
                     "# все ключи — в report.example.yaml. Повторить вопросы: --ask\n")
-            yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+            yaml.dump(raw, f, Dumper=_PlainDumper, allow_unicode=True, sort_keys=False, default_flow_style=False)
     print(f"Ответы сохранены: {path}")
     return path
 

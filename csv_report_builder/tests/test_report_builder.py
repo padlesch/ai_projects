@@ -166,6 +166,7 @@ def test_interview_saves_answers_and_stops_asking(ambiguous_dir):
     #                    7 Балл, 8 Показатель
     raw, changed = R.interview(str(ambiguous_dir), cfg, {}, answers(
         "Анализ МО", "", "9м", "2",          # заголовок, подзаголовок, период, рост — хорошо
+        "2",                                 # 5-й вопрос: колонки — проверить в консоли
         "7,8", "3", "7",                     # вид: Балл -> другое число, Показатель -> разрез
         "6",                                 # подсвечивать только Δ%
         "",                                  # главная метрика — по умолчанию
@@ -188,14 +189,14 @@ def test_interview_saves_answers_and_stops_asking(ambiguous_dir):
 
 def test_kind_change_applies_to_all_years(ambiguous_dir):
     cfg = R.deep_merge(R.DEFAULTS, {})
-    raw, _ = R.interview(str(ambiguous_dir), cfg, {}, answers("", "", "", "", "3", "2", "!"))
+    raw, _ = R.interview(str(ambiguous_dir), cfg, {}, answers("", "", "", "", "2", "3", "2", "!"))
     assert raw["columns"]["Случаи 2026"]["kind"] == raw["columns"]["Случаи 2025"]["kind"] == "money"
 
 
 def test_bad_numbers_reasked(ambiguous_dir):
     cfg = R.deep_merge(R.DEFAULTS, {})
     said = []
-    it = iter(["", "", "", "", "99", "abc", "", "!"])
+    it = iter(["", "", "", "", "2", "99", "abc", "", "!"])
     asker = R.Asker(inp=lambda p: next(it), out=lambda *a: said.append(" ".join(map(str, a))))
     R.interview(str(ambiguous_dir), cfg, {}, asker)
     assert sum("не понял" in x for x in said) == 2
@@ -337,6 +338,7 @@ def test_review_only_doubtful_structures(tmp_path):
     cfg = R.deep_merge(R.DEFAULTS, {})
     said = []
     it = iter(["", "", "", "",              # книга: заголовок, подзаголовок, период, рост
+               "2",                         # 5-й вопрос: колонки — проверить в консоли
                "",                          # какие структуры проверять — только с сомнениями
                "",                          # wide.csv: показать все колонки — нет
                "*", "3",                    # все сомнительные -> «другое число»
@@ -383,3 +385,46 @@ def test_arrow_strings_use_python_regex():
     assert nums.tolist()[:2] == [1234.5, -150.0]
     c = R.analyze_column("Сумма", pd.Series(["1 000", "2"], dtype="string[pyarrow]"), {})
     assert c.is_metric and c.values == [1000.0, 2.0]
+
+
+def test_cli_asks_at_most_five_questions(tmp_path):
+    mixed_folder(tmp_path)
+    prompts = []
+
+    def inp(p):
+        prompts.append(p)
+        return ""
+    raw, changed = R.interview(str(tmp_path), R.deep_merge(R.DEFAULTS, {}), {}, R.Asker(inp=inp, out=lambda *a: None))
+    assert changed and len(prompts) <= 5
+    assert set(raw["files"]) == {"ref.csv", "sum.csv", "wide.csv"}          # листы назначены автоматически
+    cfg = R.deep_merge(R.DEFAULTS, raw)
+    assert R.plan_questions(str(tmp_path), cfg, raw)["count"] == 0          # второй запуск — без вопросов
+
+
+def test_hierarchy_from_level_sorted_csv(tmp_path):
+    """Выгрузка идёт по уровням (все группы, потом все отделения, потом все «из них») — родитель ищется
+    по разрезам, «из них операции» встаёт под своё отделение."""
+    head = ["Уровень", "Наименование", "Большая группа", "Группа отделений", "Из них", "Сумма 2026", "Сумма 2025"]
+    rows = [[0, "Всего", "", "", "", 100, 90],
+            [1, "Основные", "Основные", "", "", 50, 40], [1, "Центры", "Центры", "", "", 40, 30],
+            [2, "ЖК", "Основные", "ЖК", "", 10, 9], [2, "КДО", "Основные", "КДО", "", 30, 20],
+            [2, "МГГЦ", "Центры", "МГГЦ", "", 5, 5], [2, "Эндоскопия", "Центры", "Эндоскопия", "", 35, 25],
+            [3, "из них операции", "Основные", "ЖК", "из них операции", 2, 1],
+            [3, "из них операции", "Основные", "КДО", "из них операции", 4, 3]]
+    write_csv(tmp_path / "r.csv", head, rows)
+    ws = build(tmp_path).worksheets[1]
+    got = [(r[1], r[2]) for r in ws.iter_rows(min_row=8, values_only=True) if r[0] is not None]
+    assert got == [("Всего", 100), ("Основные", 50), ("КДО", 30), ("из них операции", 4), ("ЖК", 10),
+                   ("из них операции", 2), ("Центры", 40), ("Эндоскопия", 35), ("МГГЦ", 5)]
+    ws = build(tmp_path, table={"hierarchy_sort": "off"}).worksheets[1]       # без сортировки — порядок CSV,
+    got = [r[1] for r in ws.iter_rows(min_row=8, values_only=True) if r[0] is not None]   # но под родителями
+    assert got == ["Всего", "Основные", "ЖК", "из них операции", "КДО", "из них операции", "Центры", "МГГЦ",
+                   "Эндоскопия"]
+
+
+def test_default_sheet_names_drop_common_part():
+    files = ["rep_app_stac_1_202610290117.csv", "rep_app_stac_1_1_202610290117.csv", "ref.csv"]
+    assert R.default_sheet_name(files[0], files) == "Отчёт 1"
+    assert R.default_sheet_name(files[1], files) == "Отчёт 1.1"
+    assert R.default_sheet_name("ref.csv", files) == "ref"
+    assert R.default_sheet_name("rep_x_2.csv", ["rep_x_2.csv", "sales_3.csv"]) == "2 rep x"
